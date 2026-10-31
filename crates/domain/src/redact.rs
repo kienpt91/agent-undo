@@ -9,7 +9,7 @@
 //! This is heuristic like the content detectors: an argument that looks like a
 //! plain word is kept. `run --no-log-args` records no arguments at all.
 
-use crate::secrets::scan_bytes;
+use crate::secrets::{is_secret_assignment, scan_bytes};
 
 pub const REDACTED: &str = "[redacted]";
 
@@ -58,6 +58,43 @@ fn redacted(prefix: &[u8]) -> Vec<u8> {
     v
 }
 
+/// Separators between the words of a shell script or a command line.
+fn is_separator(b: u8) -> bool {
+    b.is_ascii_whitespace()
+        || matches!(
+            b,
+            b'\'' | b'"' | b'`' | b';' | b'&' | b'|' | b'(' | b')' | b'<' | b'>'
+        )
+}
+
+/// Replaces the value of every secret-named `NAME=value` word inside `arg` (a
+/// `sh -c` script, a URL query, ...), leaving the rest of the text. `None` if
+/// nothing was replaced.
+fn redact_inline_assignments(arg: &[u8]) -> Option<Vec<u8>> {
+    let mut out = Vec::with_capacity(arg.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < arg.len() {
+        let start = i;
+        let sep = arg.get(i).is_some_and(|b| is_separator(*b));
+        while arg.get(i).is_some_and(|b| is_separator(*b) == sep) {
+            i += 1;
+        }
+        let word = arg.get(start..i).unwrap_or(&[]);
+        if !sep
+            && is_secret_assignment(word)
+            && let Some(eq) = word.iter().position(|b| *b == b'=')
+        {
+            out.extend_from_slice(word.get(..=eq).unwrap_or(&[]));
+            out.extend_from_slice(REDACTED.as_bytes());
+            changed = true;
+        } else {
+            out.extend_from_slice(word);
+        }
+    }
+    changed.then_some(out)
+}
+
 /// Redacts one argument on its own (without looking at its neighbours).
 fn redact_one(arg: &[u8]) -> Vec<u8> {
     let lower = arg.to_ascii_lowercase();
@@ -81,6 +118,14 @@ fn redact_one(arg: &[u8]) -> Vec<u8> {
         && scan_bytes(arg).is_some()
     {
         return redacted(arg.get(..=eq).unwrap_or(&[]));
+    }
+    if let Some(done) = redact_inline_assignments(arg) {
+        // The remainder may still contain another kind of secret.
+        return if scan_bytes(&done).is_some() {
+            REDACTED.as_bytes().to_vec()
+        } else {
+            done
+        };
     }
     if scan_bytes(arg).is_some() {
         return REDACTED.as_bytes().to_vec();

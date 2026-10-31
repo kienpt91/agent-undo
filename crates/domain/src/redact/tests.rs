@@ -126,3 +126,35 @@ fn labels_that_look_like_secrets_are_replaced() {
     let token = format!("{}{}", "gh", "p_") + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
     assert_eq!(redact_label(token.as_bytes()), REDACTED.as_bytes());
 }
+
+#[test]
+fn assignments_inside_a_shell_script_argument_are_redacted_in_place() {
+    let out = redact_args(&args(&[
+        "sh",
+        "-c",
+        "export DB_PASSWORD=hunter2; printf 'API_TOKEN=abc12345\\nPORT=5432\\n' > .env && ./run",
+    ]));
+    let joined = text(&out);
+    assert!(
+        !joined.contains("hunter2") && !joined.contains("abc12345"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("export DB_PASSWORD=[redacted];"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("&& ./run"),
+        "the rest of the script stays readable: {joined}"
+    );
+}
+
+#[test]
+fn scripts_without_secret_assignments_are_untouched() {
+    let a = args(&[
+        "sh",
+        "-c",
+        "PORT=8080 HOST=localhost cargo run --release && echo done",
+    ]);
+    assert_eq!(redact_args(&a), a);
+}

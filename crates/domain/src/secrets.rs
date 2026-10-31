@@ -460,6 +460,12 @@ fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
     hay.windows(needle.len()).any(|w| w == needle)
 }
 
+/// Whether `text` (one token of a command line, a config line, ...) is a
+/// `NAME=value` assignment of a secret-named variable; see [`dotenv_secret_line`].
+pub fn is_secret_assignment(text: &[u8]) -> bool {
+    dotenv_secret_line(text)
+}
+
 /// `NAME=value` with an UPPER_SNAKE name that names a secret and a plausible
 /// literal value (6..=256 bytes, no whitespace, not a variable reference, a path,
 /// a URL without credentials or another variable's name). Unlike the entropy rule
@@ -517,8 +523,8 @@ fn dotenv_secret_line(line: &[u8]) -> bool {
     if lower.starts_with(b"http://") || lower.starts_with(b"https://") {
         return false;
     }
-    // Another variable's name, not a secret.
-    !v.iter().all(|b| b.is_ascii_uppercase() || *b == b'_')
+    // A redaction marker (redaction is idempotent) or another variable's name.
+    v != b"[redacted]" && !v.iter().all(|b| b.is_ascii_uppercase() || *b == b'_')
 }
 
 fn assignment_secret(line: &[u8]) -> bool {
