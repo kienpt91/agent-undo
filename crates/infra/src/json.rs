@@ -2,7 +2,7 @@
 //!
 //! Only output is needed (the store uses its own line formats), so there is no
 //! parser. Strings are escaped per RFC 8259; callers additionally pass
-//! user-controlled text through [`crate::esc::display`] first so the JSON never
+//! user-controlled text through [`agent_undo_domain::esc::display`] first so the JSON never
 //! carries raw control or bidi characters.
 
 use std::fmt::Write as _;

@@ -50,9 +50,12 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
-    let n: u64 = num
-        .parse()
-        .map_err(|_| Error::Usage(format!("invalid duration {:?}", crate::esc::display_str(s))))?;
+    let n: u64 = num.parse().map_err(|_| {
+        Error::Usage(format!(
+            "invalid duration {:?}",
+            agent_undo_domain::esc::display_str(s)
+        ))
+    })?;
     let ms_per_unit: u64 = match unit {
         "ms" => 1,
         "" | "s" => 1000,
@@ -62,7 +65,7 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         _ => {
             return Err(Error::Usage(format!(
                 "invalid duration unit in {:?} (use ms, s, m, h, d)",
-                crate::esc::display_str(s)
+                agent_undo_domain::esc::display_str(s)
             )));
         }
     };
@@ -77,9 +80,12 @@ pub fn parse_size(s: &str) -> Result<u64> {
     let s = s.trim();
     let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
     let (num, unit) = s.split_at(split);
-    let n: u64 = num
-        .parse()
-        .map_err(|_| Error::Usage(format!("invalid size {:?}", crate::esc::display_str(s))))?;
+    let n: u64 = num.parse().map_err(|_| {
+        Error::Usage(format!(
+            "invalid size {:?}",
+            agent_undo_domain::esc::display_str(s)
+        ))
+    })?;
     let mult: u64 = match unit.to_ascii_lowercase().as_str() {
         "" | "b" => 1,
         "k" | "kb" | "kib" => 1 << 10,
@@ -88,7 +94,7 @@ pub fn parse_size(s: &str) -> Result<u64> {
         _ => {
             return Err(Error::Usage(format!(
                 "invalid size unit in {:?} (use B, KiB, MiB, GiB)",
-                crate::esc::display_str(s)
+                agent_undo_domain::esc::display_str(s)
             )));
         }
     };

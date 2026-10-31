@@ -1,0 +1,22 @@
+[package]
+name = "agent-undo"
+description = "Flight recorder and undo for what coding agents do to a project directory"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+readme = "../../README.md"
+
+[[bin]]
+name = "agent-undo"
+path = "src/main.rs"
+
+[dependencies]
+agent-undo-domain = { path = "../domain" }
+agent-undo-app = { path = "../app" }
+agent-undo-infra = { path = "../infra" }
+
+[lints]
+workspace = true

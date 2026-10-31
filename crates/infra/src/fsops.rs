@@ -68,7 +68,7 @@ pub fn sync_dir(dir: &Path) {
 /// Escaped path for messages.
 pub fn display_path(p: &Path) -> String {
     use std::os::unix::ffi::OsStrExt;
-    crate::esc::display(p.as_os_str().as_bytes())
+    agent_undo_domain::esc::display(p.as_os_str().as_bytes())
 }
 
 /// Returns a path inside `dir` for a temp file next to a restore target.

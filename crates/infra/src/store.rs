@@ -16,12 +16,12 @@
 
 use crate::entry::{MAX_LINE, read_capped_line};
 use crate::error::{Ctx, Error, Result};
-use crate::esc::{display, pct_decode, pct_encode};
 use crate::fsops::{
     create_new_private, create_private_dir_all, display_path, unique_suffix, write_atomic_private,
 };
-use crate::hash::{Digest, Sha256, digest_from_hex, sha256, to_hex};
 use crate::util::{now_ns, random_bytes};
+use agent_undo_domain::esc::{display, pct_decode, pct_encode};
+use agent_undo_domain::hash::{Digest, Sha256, digest_from_hex, sha256, to_hex};
 use std::collections::BTreeSet;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, Read, Write};
@@ -650,7 +650,7 @@ impl Store {
         let mut msg = Vec::with_capacity(5 + 32);
         msg.extend_from_slice(b"sens\0");
         msg.extend_from_slice(content_hash);
-        crate::hash::hmac_sha256(&self.key, &msg)
+        agent_undo_domain::hash::hmac_sha256(&self.key, &msg)
     }
 
     // --------------------------------------------------------------- blobs

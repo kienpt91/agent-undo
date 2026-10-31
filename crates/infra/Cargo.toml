@@ -1,0 +1,16 @@
+[package]
+name = "agent-undo-infra"
+description = "Filesystem, process and clock adapters implementing the agent-undo ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-undo-domain = { path = "../domain" }
+agent-undo-app = { path = "../app" }
+
+[lints]
+workspace = true

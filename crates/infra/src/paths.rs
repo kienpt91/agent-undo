@@ -62,7 +62,7 @@ pub fn validate_rel(p: &[u8]) -> Result<()> {
     let bad = |why: &str| {
         Error::Unsafe(format!(
             "invalid project-relative path {:?}: {why}",
-            crate::esc::display(p)
+            agent_undo_domain::esc::display(p)
         ))
     };
     if p.is_empty() {
@@ -112,13 +112,13 @@ pub fn check_root(root: &Path) -> Result<()> {
     let m = fs::symlink_metadata(root).ctx(|| {
         format!(
             "stat project root {}",
-            crate::esc::display(root.as_os_str().as_bytes())
+            agent_undo_domain::esc::display(root.as_os_str().as_bytes())
         )
     })?;
     if m.file_type().is_symlink() || !m.is_dir() {
         return Err(Error::Unsafe(format!(
             "project root {} is not a plain directory",
-            crate::esc::display(root.as_os_str().as_bytes())
+            agent_undo_domain::esc::display(root.as_os_str().as_bytes())
         )));
     }
     Ok(())
@@ -143,20 +143,20 @@ pub fn check_parents(root: &Path, rel: &[u8]) -> Result<()> {
                 if m.file_type().is_symlink() {
                     return Err(Error::Unsafe(format!(
                         "refusing to traverse a symlink in parent directory of {:?}",
-                        crate::esc::display(rel)
+                        agent_undo_domain::esc::display(rel)
                     )));
                 }
                 if !m.is_dir() {
                     return Err(Error::Unsafe(format!(
                         "a parent of {:?} is not a directory",
-                        crate::esc::display(rel)
+                        agent_undo_domain::esc::display(rel)
                     )));
                 }
             }
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
                 return Err(Error::io(
-                    format!("stat parent of {}", crate::esc::display(rel)),
+                    format!("stat parent of {}", agent_undo_domain::esc::display(rel)),
                     e,
                 ));
             }
@@ -204,7 +204,7 @@ pub fn rel_from_arg(root: &Path, arg: &OsStr) -> Result<Vec<u8>> {
         let rest = bytes.strip_prefix(root_b).ok_or_else(|| {
             Error::Unsafe(format!(
                 "path {:?} is outside the project root",
-                crate::esc::display(bytes)
+                agent_undo_domain::esc::display(bytes)
             ))
         })?;
         match rest.first() {
@@ -213,7 +213,7 @@ pub fn rel_from_arg(root: &Path, arg: &OsStr) -> Result<Vec<u8>> {
             Some(_) => {
                 return Err(Error::Unsafe(format!(
                     "path {:?} is outside the project root",
-                    crate::esc::display(bytes)
+                    agent_undo_domain::esc::display(bytes)
                 )));
             }
         }

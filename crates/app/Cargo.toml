@@ -1,0 +1,15 @@
+[package]
+name = "agent-undo-app"
+description = "Use cases and ports of agent-undo (depends only on the domain crate)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+agent-undo-domain = { path = "../domain" }
+
+[lints]
+workspace = true

@@ -14,9 +14,9 @@
 //! make the parser allocate without bound.
 
 use crate::error::{Error, Result};
-use crate::esc::{pct_decode, pct_encode};
-use crate::hash::{Digest, Sha256, digest_from_hex, to_hex};
 use crate::paths::{cmp_paths, validate_rel};
+use agent_undo_domain::esc::{pct_decode, pct_encode};
+use agent_undo_domain::hash::{Digest, Sha256, digest_from_hex, to_hex};
 use std::cmp::Ordering;
 use std::io::{self, BufRead, Write};
 
@@ -548,7 +548,7 @@ impl<W: Write> ChangesWriter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::sha256;
+    use agent_undo_domain::hash::sha256;
     use std::io::Cursor;
 
     fn file_entry(content: &[u8], mode: u32) -> Entry {

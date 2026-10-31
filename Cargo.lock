@@ -5,3 +5,27 @@ version = 4
 [[package]]
 name = "agent-undo"
 version = "0.1.0"
+dependencies = [
+ "agent-undo-app",
+ "agent-undo-domain",
+ "agent-undo-infra",
+]
+
+[[package]]
+name = "agent-undo-app"
+version = "0.1.0"
+dependencies = [
+ "agent-undo-domain",
+]
+
+[[package]]
+name = "agent-undo-domain"
+version = "0.1.0"
+
+[[package]]
+name = "agent-undo-infra"
+version = "0.1.0"
+dependencies = [
+ "agent-undo-app",
+ "agent-undo-domain",
+]
