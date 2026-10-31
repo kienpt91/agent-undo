@@ -23,5 +23,6 @@ pub mod secrets;
 pub mod change;
 pub mod entry;
 pub mod error;
+pub mod journal;
 pub mod path;
 pub mod units;
