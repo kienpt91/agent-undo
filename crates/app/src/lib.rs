@@ -12,5 +12,6 @@
 
 pub mod error;
 pub mod events;
+pub mod fakes;
 pub mod ports;
 pub mod usecases;
