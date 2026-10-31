@@ -1,6 +1,7 @@
 //! Snapshot policy rules that are independent of how files are read.
 
 use crate::entry::{Entry, Kind};
+use crate::hash::{Digest, hmac_sha256};
 
 /// How a regular file is recorded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +29,17 @@ pub fn classify_file(
     } else {
         FileClass::Storable
     }
+}
+
+/// Keyed "hash of hash" recorded for sensitive files: HMAC-SHA-256 of the
+/// content hash under the store key. Without the key the manifest value cannot be
+/// used to brute-force the file content, yet two snapshots of the same content
+/// still compare equal.
+pub fn sensitive_id(key: &[u8], content_hash: &Digest) -> Digest {
+    let mut msg = Vec::with_capacity(5 + 32);
+    msg.extend_from_slice(b"sens\0");
+    msg.extend_from_slice(content_hash);
+    hmac_sha256(key, &msg)
 }
 
 /// Whether a previously recorded entry may stand in for re-reading the file.
@@ -84,6 +96,20 @@ mod tests {
             !cache_usable(&c, 10, 100, 200, 100),
             "mtime not older than the cutoff"
         );
+    }
+
+    #[test]
+    fn sensitive_id_is_keyed_deterministic_and_not_the_plain_hash() {
+        let h = sha256(b"secret content");
+        let id = sensitive_id(b"key-one", &h);
+        assert_ne!(id, h);
+        assert_eq!(id, sensitive_id(b"key-one", &h));
+        assert_ne!(
+            id,
+            sensitive_id(b"key-two", &h),
+            "different keys give different ids"
+        );
+        assert_ne!(id, sensitive_id(b"key-one", &sha256(b"other")));
     }
 
     #[test]
