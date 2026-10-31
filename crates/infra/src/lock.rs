@@ -28,6 +28,7 @@ impl FsLocker {
             .create(true)
             .truncate(false)
             .mode(0o600)
+            .custom_flags(crate::fsutil::O_NOFOLLOW)
             .open(&self.path)
             .ctx(|| "opening lock file".into())?;
         let r = if exclusive {

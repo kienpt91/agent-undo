@@ -14,16 +14,17 @@
 //! ```
 
 use crate::fsutil::{
-    create_new_private, create_private_dir_all, display_path, now_ns, random_bytes,
-    write_atomic_private,
+    O_NOFOLLOW, create_new_private, create_private_dir_all, display_path, effective_uid, now_ns,
+    random_bytes, write_atomic_private,
 };
 use agent_undo_app::error::{Ctx, Error, Result};
 use agent_undo_domain::esc::{display, pct_decode, pct_encode};
 use agent_undo_domain::hash::{digest_from_hex, sha256, to_hex};
 use std::ffi::OsString;
-use std::fs::{self, File};
+use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 pub const STORE_HEADER: &str = "agent-undo-store v1";
@@ -115,7 +116,11 @@ fn encode_meta(m: &Meta) -> String {
 }
 
 pub fn read_small(path: &Path, cap: u64) -> Result<Vec<u8>> {
-    let f = File::open(path).ctx(|| format!("opening {}", display_path(path)))?;
+    let f = OpenOptions::new()
+        .read(true)
+        .custom_flags(O_NOFOLLOW)
+        .open(path)
+        .ctx(|| format!("opening {}", display_path(path)))?;
     let mut buf = Vec::new();
     f.take(cap + 1)
         .read_to_end(&mut buf)
@@ -138,6 +143,57 @@ pub fn read_file_capped(path: &Path, cap: u64) -> Result<Option<Vec<u8>>> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(Error::io(format!("stat {}", display_path(path)), e)),
     }
+}
+
+const STORE_DIRS: &[&str] = &["blobs", "checkpoints", "tmp"];
+const STORE_FILES: &[&str] = &["meta", "key", "log", "lock", "pruned", "sensitive-ids"];
+
+/// Fails if anything already inside `dir` is a symlink (a planted link could
+/// redirect the store's writes to another file) or if `dir` itself is one.
+fn refuse_planted_links(dir: &Path) -> Result<()> {
+    let md = match fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(Error::io(format!("stat {}", display_path(dir)), e)),
+    };
+    if md.file_type().is_symlink() || !md.is_dir() {
+        return Err(Error::Unsafe(format!(
+            "store path {} is not a plain directory (symlink?)",
+            display_path(dir)
+        )));
+    }
+    for ent in fs::read_dir(dir).ctx(|| format!("listing {}", display_path(dir)))? {
+        let ent = ent.ctx(|| format!("listing {}", display_path(dir)))?;
+        let m = fs::symlink_metadata(ent.path())
+            .ctx(|| format!("stat {}", display_path(&ent.path())))?;
+        if m.file_type().is_symlink() {
+            return Err(Error::Unsafe(format!(
+                "{} is a symlink inside the store directory; refusing to continue (remove it if you put it there)",
+                display_path(&ent.path())
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Requires `path` (already lstat'ed as `md`) to be owned by `uid` with no group or
+/// other permission bits.
+fn check_private(path: &Path, md: &fs::Metadata, uid: u32) -> Result<()> {
+    if md.uid() != uid {
+        return Err(Error::Unsafe(format!(
+            "{} is owned by user {} but you are user {uid}; refusing to use a store another user controls",
+            display_path(path),
+            md.uid()
+        )));
+    }
+    let mode = md.mode() & 0o7777;
+    if mode & 0o077 != 0 {
+        return Err(Error::Unsafe(format!(
+            "{} has mode {mode:04o}: group and other users must have no access (run `chmod go-rwx` on it)",
+            display_path(path)
+        )));
+    }
+    Ok(())
 }
 
 /// The directory layout of one project's store plus its metadata and key.
@@ -163,10 +219,12 @@ impl StoreDir {
                 display_path(dir)
             )));
         }
+        refuse_planted_links(dir)?;
         create_private_dir_all(dir)?;
         for sub in ["blobs", "checkpoints", "tmp"] {
             create_private_dir_all(&dir.join(sub))?;
         }
+        refuse_planted_links(dir)?;
         let key = random_bytes(32)?;
         let key_path = dir.join("key");
         let mut kf = create_new_private(&key_path)
@@ -183,8 +241,18 @@ impl StoreDir {
             .and_then(|()| kf.sync_all())
             .ctx(|| "writing key file".into())?;
         let log = dir.join("log");
-        if !log.exists() {
-            drop(create_new_private(&log).ctx(|| "creating log".into())?);
+        match fs::symlink_metadata(&log) {
+            Ok(m) if m.is_file() => {}
+            Ok(_) => {
+                return Err(Error::Unsafe(format!(
+                    "{} exists and is not a regular file",
+                    display_path(&log)
+                )));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                drop(create_new_private(&log).ctx(|| "creating log".into())?);
+            }
+            Err(e) => return Err(Error::io("checking the log file", e)),
         }
         let meta = Meta {
             root: root.to_path_buf(),
@@ -201,8 +269,16 @@ impl StoreDir {
         StoreDir::open_at(dir, root)
     }
 
-    /// Opens an existing store at `dir`, verifying it belongs to `root`.
+    /// Opens an existing store at `dir`, verifying it belongs to `root` and that it is
+    /// private: owned by the current user, no symlinked store files, no group or
+    /// other access to the store, and (for a store outside the project) a parent
+    /// directory other users cannot write to.
     pub fn open_at(dir: &Path, root: &Path) -> Result<StoreDir> {
+        StoreDir::open_at_as(dir, root, effective_uid()?)
+    }
+
+    /// Like [`StoreDir::open_at`] with an explicit expected owner (tests).
+    pub fn open_at_as(dir: &Path, root: &Path, uid: u32) -> Result<StoreDir> {
         let md = fs::symlink_metadata(dir).map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 Error::NotInitialized(format!("no store at {}", display_path(dir)))
@@ -215,6 +291,25 @@ impl StoreDir {
                 "store path {} is not a plain directory (symlink?)",
                 display_path(dir)
             )));
+        }
+        check_private(dir, &md, uid)?;
+        for name in STORE_DIRS.iter().chain(STORE_FILES) {
+            let p = dir.join(name);
+            match fs::symlink_metadata(&p) {
+                Ok(m) => {
+                    let want_dir = STORE_DIRS.contains(name);
+                    if m.file_type().is_symlink() || m.is_dir() != want_dir {
+                        return Err(Error::Unsafe(format!(
+                            "{} is a symlink or not a plain {}; refusing to use this store",
+                            display_path(&p),
+                            if want_dir { "directory" } else { "file" }
+                        )));
+                    }
+                    check_private(&p, &m, uid)?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(Error::io(format!("stat {}", display_path(&p)), e)),
+            }
         }
         let text = match read_small(&dir.join("meta"), 64 * 1024) {
             Ok(t) => t,
@@ -235,6 +330,18 @@ impl StoreDir {
                 display_path(dir),
                 display(meta.root.as_os_str().as_bytes()),
                 display(root.as_os_str().as_bytes())
+            )));
+        }
+        if !meta.in_project
+            && let Some(parent) = dir.parent()
+            && let Ok(pm) = fs::metadata(parent)
+            && pm.mode() & 0o022 != 0
+            && pm.mode() & 0o1000 == 0
+        {
+            return Err(Error::Unsafe(format!(
+                "{} is writable by other users (mode {:04o}) and not sticky: another user could replace the store; run `chmod go-w` on it",
+                display_path(parent),
+                pm.mode() & 0o7777
             )));
         }
         let key_text = read_small(&dir.join("key"), 1024)?;

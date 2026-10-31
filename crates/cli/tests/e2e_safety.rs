@@ -1007,6 +1007,8 @@ fn the_store_files_stay_private_after_heavy_use() {
 
 fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     fs::create_dir_all(to).unwrap();
+    // like `cp -a`: keep the private modes of the store
+    fs::set_permissions(to, fs::metadata(from).unwrap().permissions()).unwrap();
     for e in fs::read_dir(from).unwrap().flatten() {
         let (src, dst) = (e.path(), to.join(e.file_name()));
         if e.file_type().unwrap().is_dir() {

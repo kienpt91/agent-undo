@@ -2,13 +2,14 @@
 //! records plus a `pruned` list.
 
 use crate::codec::{MAX_LINE, read_capped_line};
+use crate::fsutil::O_NOFOLLOW;
 use crate::fsutil::display_path;
 use crate::layout::read_small;
 use agent_undo_app::error::{Ctx, Error, Result};
 use agent_undo_app::ports::JournalRepository;
 use agent_undo_domain::journal::{CheckpointId, CheckpointRecord, Journal};
 use std::collections::BTreeSet;
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::{BufReader, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
@@ -47,7 +48,11 @@ impl FsJournal {
 
 impl JournalRepository for FsJournal {
     fn load(&self) -> Result<Journal> {
-        let file = File::open(&self.log).ctx(|| format!("opening {}", display_path(&self.log)))?;
+        let file = OpenOptions::new()
+            .read(true)
+            .custom_flags(O_NOFOLLOW)
+            .open(&self.log)
+            .ctx(|| format!("opening {}", display_path(&self.log)))?;
         let mut r = BufReader::new(file);
         let mut buf = Vec::new();
         let mut records = Vec::new();
@@ -76,6 +81,7 @@ impl JournalRepository for FsJournal {
         }
         let mut f = OpenOptions::new()
             .append(true)
+            .custom_flags(O_NOFOLLOW)
             .open(&self.log)
             .ctx(|| "opening log for append".into())?;
         f.write_all(line.as_bytes())
@@ -91,6 +97,7 @@ impl JournalRepository for FsJournal {
             .create(true)
             .append(true)
             .mode(0o600)
+            .custom_flags(O_NOFOLLOW)
             .open(&self.pruned)
             .ctx(|| "opening pruned list".into())?;
         let text: String = ids.iter().map(|i| format!("{}\n", i.get())).collect();

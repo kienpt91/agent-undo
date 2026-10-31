@@ -1717,12 +1717,14 @@ fn doctor_fails_when_the_key_file_is_group_readable() {
     .unwrap();
     let o = p.run(&["doctor"]);
     assert_eq!(o.code, 5, "{}", o.all());
+    // Opening a store checks owner and permissions, so doctor reports the refusal as the
+    // failed `store` check (it is a finding, not a crash).
+    assert!(o.stdout.contains("[FAIL] store:"), "{}", o.stdout);
     assert!(
-        o.stdout.contains("[FAIL] store permissions"),
+        o.stdout.contains("key has mode 0644") && o.stdout.contains("no access"),
         "{}",
         o.stdout
     );
-    assert!(o.stdout.contains("key is 0644"), "{}", o.stdout);
     let (code, j) = p.json_code(&["doctor"]);
     assert_eq!(code, 5);
     assert!(
@@ -1742,7 +1744,8 @@ fn doctor_fails_when_the_store_directory_is_world_accessible() {
     .unwrap();
     let o = p.run(&["doctor"]);
     assert_eq!(o.code, 5, "{}", o.all());
-    assert!(o.stdout.contains("(want 0700 or stricter)"), "{}", o.stdout);
+    assert!(o.stdout.contains("[FAIL] store:"), "{}", o.stdout);
+    assert!(o.stdout.contains("has mode 0755"), "{}", o.stdout);
 }
 
 #[test]

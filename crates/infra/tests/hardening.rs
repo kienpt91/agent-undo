@@ -482,3 +482,61 @@ fn a_huge_directory_of_ignored_files_does_not_trip_the_cap_or_the_memory() {
     assert!(seen.has("src/main.rs"));
     assert!(stats.warnings.is_empty(), "{:?}", stats.warnings);
 }
+
+// ------------------------------------------- SU-008: store files are opened without following links
+
+#[test]
+fn appending_to_a_symlinked_log_is_refused_and_the_target_untouched() {
+    use agent_undo_app::ports::JournalRepository;
+    use agent_undo_domain::change::Counts;
+    use agent_undo_domain::journal::{CkptKind, Journal, NewCheckpoint};
+    let base = std::env::temp_dir().join(format!("au-hard-log-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let victim = base.join("victim.txt");
+    fs::write(&victim, b"precious").unwrap();
+    symlink(&victim, base.join("log")).unwrap();
+    let repo = agent_undo_infra::fs_journal::FsJournal::new(base.join("log"), base.join("pruned"));
+    let mut j = Journal::empty();
+    let (rec, _) = j
+        .record(NewCheckpoint::new(
+            CkptKind::Baseline,
+            1,
+            sha256(b"m"),
+            sha256(b"c"),
+            Counts::default(),
+            0,
+        ))
+        .unwrap();
+    assert!(repo.append(&rec).is_err());
+    assert!(
+        repo.load().is_err(),
+        "reading through the link is refused too"
+    );
+    assert_eq!(fs::read(&victim).unwrap(), b"precious");
+    // pruned list likewise
+    symlink(&victim, base.join("pruned")).unwrap();
+    assert!(
+        repo.save_pruned(&[agent_undo_domain::journal::CheckpointId::new(1).unwrap()])
+            .is_err()
+    );
+    assert_eq!(fs::read(&victim).unwrap(), b"precious");
+    let _ = fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_dangling_lock_symlink_does_not_create_the_target() {
+    use agent_undo_app::ports::Locker;
+    let base = std::env::temp_dir().join(format!("au-hard-lock-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&base);
+    fs::create_dir_all(&base).unwrap();
+    let target = base.join("should-not-appear");
+    symlink(&target, base.join("lock")).unwrap();
+    let l = agent_undo_infra::lock::FsLocker::new(base.join("lock"));
+    assert!(l.exclusive().is_err());
+    assert!(
+        !target.exists(),
+        "the lock open created a file through a planted symlink"
+    );
+    let _ = fs::remove_dir_all(&base);
+}

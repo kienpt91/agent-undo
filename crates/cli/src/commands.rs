@@ -30,6 +30,7 @@ use agent_undo_infra::support::NullSink;
 use std::fs;
 use std::io::Write;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -130,8 +131,19 @@ fn add_git_exclude(root: &Path) -> Result<Option<String>> {
         return Ok(Some(".git is not a directory (worktree or submodule); add .agent-undo to its exclude file manually".into()));
     }
     let info = git.join("info");
-    fs::create_dir_all(&info).map_err(|e| Error::io("creating .git/info", e))?;
     let exclude = info.join("exclude");
+    // `.git` may come from a cloned or extracted tree: never write through a symlink.
+    for p in [&info, &exclude] {
+        if fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Ok(Some(format!(
+                "{} is a symlink; not touching it. Add {IN_PROJECT_DIR} to your git exclude rules manually",
+                display_path(p)
+            )));
+        }
+    }
+    if !info.is_dir() {
+        fs::create_dir(&info).map_err(|e| Error::io("creating .git/info", e))?;
+    }
     let current = fs::read_to_string(&exclude).unwrap_or_default();
     if current
         .lines()
@@ -142,6 +154,7 @@ fn add_git_exclude(root: &Path) -> Result<Option<String>> {
     let mut f = fs::OpenOptions::new()
         .create(true)
         .append(true)
+        .custom_flags(agent_undo_infra::fsutil::O_NOFOLLOW)
         .open(&exclude)
         .map_err(|e| Error::io("opening .git/info/exclude", e))?;
     let prefix = if current.is_empty() || current.ends_with('\n') {
@@ -269,7 +282,8 @@ fn cmd_run(
                         "external_checkpoint",
                         rep.external.as_ref().map(|e| render::record_json(e, false)),
                     )
-                    .with("exit_status", i64::from(rep.exit.status_code()));
+                    .with("exit_status", i64::from(rep.exit.status_code()))
+                    .with("warnings", render::warnings_json(&rep.stats));
                 io.errln(&j.to_compact());
             } else {
                 let c = &rep.checkpoint;
@@ -285,6 +299,9 @@ fn cmd_run(
                     render::counts_text(&c.counts),
                     rep.exit.status_code()
                 ));
+                for l in render::warning_lines(&rep.stats) {
+                    io.errln(&l);
+                }
             }
             rep.exit.status_code()
         }
@@ -478,6 +495,19 @@ fn cmd_doctor(cli: &Cli, io: &mut Io<'_>) -> Result<i32> {
     let base = state_base().ok();
     let (root, store) = match StoreDir::locate(&start, cli.project.is_some(), base.as_deref()) {
         Ok(s) => (s.root.clone(), Some(s)),
+        Err(Error::Unsafe(why)) => {
+            // A store that fails the ownership/permission checks is a finding, not a crash.
+            let root = fs::canonicalize(&start)
+                .map_err(|e| Error::io(format!("resolving {}", display_path(&start)), e))?;
+            let mut checks = run_checks(&root, None);
+            checks.retain(|c| c.name != "store");
+            checks.push(crate::doctor::Check {
+                name: "store",
+                status: Status::Fail,
+                detail: why,
+            });
+            return finish_doctor(cli, io, &checks);
+        }
         Err(Error::NotInitialized(_)) => (
             fs::canonicalize(&start)
                 .map_err(|e| Error::io(format!("resolving {}", display_path(&start)), e))?,
@@ -486,10 +516,14 @@ fn cmd_doctor(cli: &Cli, io: &mut Io<'_>) -> Result<i32> {
         Err(e) => return Err(e),
     };
     let checks = run_checks(&root, store.as_ref());
+    finish_doctor(cli, io, &checks)
+}
+
+fn finish_doctor(cli: &Cli, io: &mut Io<'_>, checks: &[crate::doctor::Check]) -> Result<i32> {
     if cli.json {
-        io.json(&doctor_json(&checks));
+        io.json(&doctor_json(checks));
     } else {
-        io.out_text(&doctor_text(&checks));
+        io.out_text(&doctor_text(checks));
     }
     Ok(if checks.iter().any(|c| c.status == Status::Fail) {
         exit::INTEGRITY
@@ -522,7 +556,8 @@ fn execute(cli: &Cli, io: &mut Io<'_>) -> Result<i32> {
             if cli.json {
                 io.json(
                     &envelope("checkpoint")
-                        .with("checkpoint", render::record_json(&out.record, false)),
+                        .with("checkpoint", render::record_json(&out.record, false))
+                        .with("warnings", render::warnings_json(&out.stats)),
                 );
             } else {
                 io.outln(&format!(
@@ -531,6 +566,9 @@ fn execute(cli: &Cli, io: &mut Io<'_>) -> Result<i32> {
                     out.record.session,
                     render::counts_text(&out.record.counts)
                 ));
+                for l in render::warning_lines(&out.stats) {
+                    io.errln(&l);
+                }
             }
             Ok(exit::OK)
         }

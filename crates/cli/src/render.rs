@@ -7,6 +7,7 @@
 
 use crate::json::Json;
 use agent_undo_app::error::Error;
+use agent_undo_app::ports::ScanStats;
 use agent_undo_app::usecases::gc::GcReport;
 use agent_undo_app::usecases::history::{ChangeView, Content, DiffReport};
 use agent_undo_app::usecases::reversal::ReversalReport;
@@ -40,6 +41,34 @@ pub fn error_json(e: &Error) -> Json {
             .with("code", e.code())
             .with("message", display(e.to_string().as_bytes())),
     )
+}
+
+/// Scan warnings (unreadable files, degraded directories, ...), escaped, at most five lines.
+pub fn warning_lines(stats: &ScanStats) -> Vec<String> {
+    let mut out: Vec<String> = stats
+        .warnings
+        .iter()
+        .take(5)
+        .map(|w| format!("agent-undo: warning: {}", display(w.as_bytes())))
+        .collect();
+    let more = stats.warnings_total.saturating_sub(out.len() as u64);
+    if more > 0 {
+        out.push(format!("agent-undo: ... and {more} more warnings"));
+    }
+    out
+}
+
+pub fn warnings_json(stats: &ScanStats) -> Json {
+    Json::obj()
+        .with(
+            "items",
+            stats
+                .warnings
+                .iter()
+                .map(|w| display(w.as_bytes()))
+                .collect::<Vec<String>>(),
+        )
+        .with("total", stats.warnings_total)
 }
 
 /// `run --json` output when the command ran but its checkpoint could not be recorded.

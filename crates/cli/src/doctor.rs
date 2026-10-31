@@ -117,9 +117,8 @@ pub fn run_checks(root: &Path, store: Option<&StoreDir>) -> Vec<Check> {
         ));
     }
     // Environment.
-    let euid_root = fs::metadata("/proc/self")
-        .map(|m| m.uid() == 0)
-        .unwrap_or(false);
+    // Works on macOS too (no /proc there): see `effective_uid`.
+    let euid_root = agent_undo_infra::fsutil::effective_uid().is_ok_and(|u| u == 0);
     if euid_root {
         out.push(check(
             "user",

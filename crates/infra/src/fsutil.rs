@@ -81,6 +81,32 @@ pub fn system_time_ns(t: SystemTime) -> i64 {
     }
 }
 
+/// The effective user id of this process, read without `unsafe`: from the owner of
+/// `/proc/self` where that exists (Linux), otherwise from the owner of a file this
+/// process creates itself in the temp directory (macOS).
+pub fn effective_uid() -> Result<u32> {
+    static UID: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    if let Some(u) = UID.get() {
+        return Ok(*u);
+    }
+    let uid = match fs::metadata("/proc/self") {
+        Ok(m) => m.uid(),
+        Err(_) => {
+            let probe = std::env::temp_dir().join(format!("agent-undo-uid-{}", unique_suffix()));
+            let f =
+                create_new_private(&probe).ctx(|| "determining the current user id".to_string())?;
+            let uid = f
+                .metadata()
+                .ctx(|| "determining the current user id".to_string())?
+                .uid();
+            drop(f);
+            let _ = fs::remove_file(&probe);
+            uid
+        }
+    };
+    Ok(*UID.get_or_init(|| uid))
+}
+
 /// Fills `n` bytes from the operating system's random source.
 pub fn random_bytes(n: usize) -> Result<Vec<u8>> {
     use std::io::Read;

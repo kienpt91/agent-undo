@@ -1,5 +1,6 @@
 use super::*;
-use std::os::unix::fs::PermissionsExt;
+use crate::fsutil::create_private_dir_all;
+use std::os::unix::fs::{PermissionsExt, symlink};
 
 fn tmp(name: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("au-layout-{name}-{}", std::process::id()));
@@ -195,4 +196,211 @@ fn read_file_capped_behaviour() {
         None,
         "symlinks are not followed"
     );
+}
+
+// ---- SU-008: init never follows planted symlinks
+
+fn victim(base: &Path) -> PathBuf {
+    let v = base.join("victim.txt");
+    fs::write(&v, b"keep me").unwrap();
+    v
+}
+
+#[test]
+fn create_refuses_a_store_directory_that_is_a_symlink() {
+    let base = tmp("create-symdir");
+    let root = base.join("proj");
+    fs::create_dir_all(&root).unwrap();
+    let real = base.join("real");
+    fs::create_dir_all(&real).unwrap();
+    symlink(&real, base.join("state")).unwrap();
+    let r = StoreDir::create(&base.join("state"), &root, false, 1);
+    assert!(matches!(r, Err(Error::Unsafe(_))), "{r:?}");
+    assert!(
+        fs::read_dir(&real).unwrap().next().is_none(),
+        "nothing was created through the link"
+    );
+}
+
+#[test]
+fn create_refuses_planted_symlinks_inside_the_store_directory() {
+    for name in [
+        "log",
+        "key",
+        "tmp",
+        "blobs",
+        "checkpoints",
+        "sensitive-ids",
+        "pruned",
+        "lock",
+    ] {
+        let base = tmp(&format!("create-plant-{name}"));
+        let root = base.join("proj");
+        fs::create_dir_all(&root).unwrap();
+        let store = base.join("state");
+        fs::create_dir_all(&store).unwrap();
+        let v = victim(&base);
+        let target: &Path = if matches!(name, "tmp" | "blobs" | "checkpoints") {
+            &base
+        } else {
+            &v
+        };
+        symlink(target, store.join(name)).unwrap();
+        let r = StoreDir::create(&store, &root, false, 1);
+        assert!(matches!(r, Err(Error::Unsafe(_))), "{name}: {r:?}");
+        assert_eq!(fs::read(&v).unwrap(), b"keep me", "{name}");
+        assert!(
+            !store.join("meta").exists(),
+            "{name}: init must not complete"
+        );
+    }
+}
+
+#[test]
+fn create_tolerates_plain_leftovers_of_an_interrupted_init() {
+    let base = tmp("create-leftover");
+    let root = base.join("proj");
+    fs::create_dir_all(&root).unwrap();
+    let store = base.join("state");
+    // what an interrupted init of this tool leaves behind: private dirs and files
+    create_private_dir_all(&store.join("blobs")).unwrap();
+    fs::write(store.join("key"), "stale").unwrap();
+    fs::write(store.join("log"), "").unwrap();
+    for f in ["key", "log"] {
+        fs::set_permissions(store.join(f), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let s = StoreDir::create(&store, &root, false, 1).unwrap();
+    assert_eq!(
+        fs::read_to_string(store.join("key")).unwrap().len(),
+        64,
+        "key replaced"
+    );
+    assert_eq!(s.meta.max_file_size, 1);
+}
+
+// ---- SU-009: opening a store checks owner and permissions
+
+fn assert_unsafe(r: Result<StoreDir>, what: &str) {
+    assert!(matches!(r, Err(Error::Unsafe(_))), "{what}: {r:?}");
+}
+
+#[test]
+fn open_refuses_a_store_that_is_not_private() {
+    for (rel, mode) in [
+        ("", 0o750),
+        ("", 0o755),
+        ("", 0o777),
+        ("blobs", 0o755),
+        ("checkpoints", 0o770),
+        ("tmp", 0o777),
+        ("key", 0o644),
+        ("key", 0o640),
+        ("meta", 0o666),
+        ("log", 0o644),
+    ] {
+        let (_b, s) = mk(&format!("open-mode-{}-{mode:o}", rel.replace('/', "_")));
+        let p = if rel.is_empty() {
+            s.dir.clone()
+        } else {
+            s.dir.join(rel)
+        };
+        fs::set_permissions(&p, fs::Permissions::from_mode(mode)).unwrap();
+        let r = StoreDir::open_at(&s.dir, &s.root);
+        assert_unsafe(r, &format!("{rel:?} {mode:o}"));
+        fs::set_permissions(
+            &p,
+            fs::Permissions::from_mode(if p.is_dir() { 0o700 } else { 0o600 }),
+        )
+        .unwrap();
+        assert!(
+            StoreDir::open_at(&s.dir, &s.root).is_ok(),
+            "{rel:?} fine again"
+        );
+    }
+}
+
+#[test]
+fn open_refuses_a_store_owned_by_someone_else() {
+    let (_b, s) = mk("open-owner");
+    let me = crate::fsutil::effective_uid().unwrap();
+    let other = me.wrapping_add(1);
+    let r = StoreDir::open_at_as(&s.dir, &s.root, other);
+    match r {
+        Err(Error::Unsafe(m)) => assert!(m.contains("owned by"), "{m}"),
+        other => panic!("{other:?}"),
+    }
+    assert!(StoreDir::open_at_as(&s.dir, &s.root, me).is_ok());
+}
+
+#[test]
+fn open_refuses_symlinked_children() {
+    for name in ["meta", "key", "log", "tmp", "blobs", "checkpoints"] {
+        let (b, s) = mk(&format!("open-symchild-{name}"));
+        let real = s.dir.join(name);
+        let moved = b.join(format!("moved-{name}"));
+        fs::rename(&real, &moved).unwrap();
+        symlink(&moved, &real).unwrap();
+        assert_unsafe(StoreDir::open_at(&s.dir, &s.root), name);
+    }
+}
+
+#[test]
+fn open_refuses_optional_files_that_are_symlinks_or_loose() {
+    for name in ["lock", "pruned", "sensitive-ids"] {
+        let (b, s) = mk(&format!("open-opt-{name}"));
+        let v = victim(&b);
+        symlink(&v, s.dir.join(name)).unwrap();
+        assert_unsafe(
+            StoreDir::open_at(&s.dir, &s.root),
+            &format!("{name} symlink"),
+        );
+        fs::remove_file(s.dir.join(name)).unwrap();
+        fs::write(s.dir.join(name), b"").unwrap();
+        fs::set_permissions(s.dir.join(name), fs::Permissions::from_mode(0o666)).unwrap();
+        assert_unsafe(StoreDir::open_at(&s.dir, &s.root), &format!("{name} loose"));
+        fs::set_permissions(s.dir.join(name), fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(StoreDir::open_at(&s.dir, &s.root).is_ok(), "{name}");
+    }
+}
+
+#[test]
+fn an_external_store_in_a_directory_others_can_write_to_is_refused() {
+    let base = tmp("open-parent");
+    let root = base.join("proj");
+    fs::create_dir_all(&root).unwrap();
+    let state = base.join("state");
+    let ext = external_store_dir(&state, &root);
+    StoreDir::create(&ext, &root, false, 1).unwrap();
+    let parent = ext.parent().unwrap().to_path_buf();
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o777)).unwrap();
+    assert_unsafe(StoreDir::open_at(&ext, &root), "world-writable parent");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o1777)).unwrap();
+    assert!(
+        StoreDir::open_at(&ext, &root).is_ok(),
+        "sticky parents (like /tmp) are fine"
+    );
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o770)).unwrap();
+    assert_unsafe(StoreDir::open_at(&ext, &root), "group-writable parent");
+    fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(StoreDir::open_at(&ext, &root).is_ok());
+}
+
+#[test]
+fn an_in_project_store_may_live_in_a_group_writable_project() {
+    let base = tmp("open-inproject-parent");
+    let root = base.join("proj");
+    fs::create_dir_all(&root).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o775)).unwrap();
+    let inner = root.join(IN_PROJECT_DIR);
+    StoreDir::create(&inner, &root, true, 1).unwrap();
+    assert!(StoreDir::open_at(&inner, &root).is_ok());
+}
+
+#[test]
+fn read_small_refuses_symlinks() {
+    let base = tmp("read-small");
+    let v = victim(&base);
+    symlink(&v, base.join("l")).unwrap();
+    assert!(read_small(&base.join("l"), 100).is_err());
+    assert_eq!(read_small(&v, 100).unwrap(), b"keep me");
 }
