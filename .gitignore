@@ -1,0 +1,7 @@
+/target
+.env
+.env.*
+*.pem
+*.key
+.agent-undo
+.agent-undo/
