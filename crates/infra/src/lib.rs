@@ -1,5 +1,5 @@
-//! agent-undo: a tool-agnostic flight recorder and undo for what coding agents
-//! do to a project directory.
+//! Infrastructure adapters: filesystem, process and clock implementations of
+//! the application ports. Depends on the domain and application crates only.
 #![forbid(unsafe_code)]
 #![cfg_attr(
     not(test),
@@ -11,10 +11,4 @@
     )
 )]
 
-pub mod entry;
-pub mod error;
-pub mod fsops;
-pub mod json;
-pub mod paths;
-pub mod store;
-pub mod util;
+pub mod fsutil;
