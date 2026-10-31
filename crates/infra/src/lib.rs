@@ -19,3 +19,6 @@ pub mod fs_tree;
 pub mod fsutil;
 pub mod layout;
 pub mod lock;
+pub mod process;
+pub mod project;
+pub mod support;
