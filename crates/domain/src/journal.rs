@@ -510,6 +510,20 @@ impl Journal {
             .ok_or_else(|| DomainError::Usage(format!("no checkpoint {id}")))
     }
 
+    /// Number the next checkpoint will get.
+    pub fn next_id(&self) -> CheckpointId {
+        self.head().map_or(CheckpointId(1), |h| h.id.next())
+    }
+
+    /// Session the next checkpoint will belong to.
+    pub fn next_session(&self, new_session: bool) -> SessionId {
+        match self.head() {
+            None => SessionId(1),
+            Some(h) if new_session => SessionId(h.session.get() + 1),
+            Some(h) => h.session,
+        }
+    }
+
     pub fn current_session(&self) -> Option<SessionId> {
         self.head().map(|h| h.session)
     }
@@ -540,7 +554,7 @@ impl Journal {
                 "a baseline already exists".into()
             }));
         }
-        let id = self.head().map_or(CheckpointId(1), |h| h.id.next());
+        let id = self.next_id();
         match (new.kind.needs_reference(), new.reference) {
             (true, None) => {
                 return Err(DomainError::Invalid(format!(
@@ -564,11 +578,8 @@ impl Journal {
                 "the baseline always opens session 1".into(),
             ));
         }
-        let (session, started) = match self.head() {
-            None => (SessionId(1), true),
-            Some(h) if new.new_session => (SessionId(h.session.get() + 1), true),
-            Some(h) => (h.session, false),
-        };
+        let session = self.next_session(new.new_session);
+        let started = first || new.new_session;
         let mut rec = CheckpointRecord {
             id,
             session,
@@ -1016,6 +1027,23 @@ mod tests {
         );
         assert!(Journal::from_records(recs.clone(), BTreeSet::from([9])).is_err());
         assert!(Journal::from_records(recs, BTreeSet::from([0])).is_err());
+    }
+
+    #[test]
+    fn next_id_and_next_session_preview_the_following_record() {
+        let mut j = Journal::empty();
+        assert_eq!((j.next_id().get(), j.next_session(false).get()), (1, 1));
+        j.record(nc(CkptKind::Baseline, 1, 0)).unwrap();
+        assert_eq!(
+            (
+                j.next_id().get(),
+                j.next_session(false).get(),
+                j.next_session(true).get()
+            ),
+            (2, 1, 2)
+        );
+        let (rec, _) = j.record(nc(CkptKind::Run, 2, 0)).unwrap();
+        assert_eq!(rec.id, CheckpointId::new(2).unwrap());
     }
 
     #[test]

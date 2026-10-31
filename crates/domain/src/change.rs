@@ -174,6 +174,13 @@ pub trait EntrySource {
     fn next_entry(&mut self) -> Result<Option<(RelPath, Entry)>, Self::Error>;
 }
 
+impl<T: EntrySource + ?Sized> EntrySource for Box<T> {
+    type Error = T::Error;
+    fn next_entry(&mut self) -> Result<Option<(RelPath, Entry)>, Self::Error> {
+        (**self).next_entry()
+    }
+}
+
 /// In-memory entry source (already sorted).
 pub struct VecSource {
     items: std::collections::VecDeque<(RelPath, Entry)>,
@@ -306,6 +313,22 @@ impl<S: EntrySource> Merger<S> {
             }
         }
     }
+}
+
+/// Order-independent fingerprint accumulator over a pending change set: two
+/// scans with the same changes (same paths, kinds and new states) produce the
+/// same value whatever order the changes arrive in.
+pub fn fingerprint_step(acc: u64, c: &Change) -> u64 {
+    let mut h = crate::hash::Sha256::new();
+    h.update(c.path().as_bytes());
+    h.update(c.kind().as_str().as_bytes());
+    if let Some(a) = c.after() {
+        h.update(a.encode().as_bytes());
+    }
+    let d = h.finalize();
+    let mut b = [0u8; 8];
+    b.copy_from_slice(d.get(..8).unwrap_or(&[0; 8]));
+    acc.wrapping_add(u64::from_le_bytes(b))
 }
 
 // ------------------------------------------------------------ composition
@@ -492,6 +515,26 @@ mod tests {
         assert!(Change::decode("deleted\ta").is_err());
         assert!(Change::decode(&format!("deleted\ta\t{a}\t-\textra")).is_err());
         assert!(Change::decode("bogus\ta\t-\t-").is_err());
+    }
+
+    #[test]
+    fn fingerprint_is_order_independent_and_sensitive_to_content() {
+        let a = Change::new(p("a"), None, Some(f(b"1", 0o644))).unwrap();
+        let b = Change::new(p("b"), None, Some(f(b"2", 0o644))).unwrap();
+        let b2 = Change::new(p("b"), None, Some(f(b"3", 0o644))).unwrap();
+        let ab = fingerprint_step(fingerprint_step(0, &a), &b);
+        let ba = fingerprint_step(fingerprint_step(0, &b), &a);
+        assert_eq!(ab, ba);
+        assert_ne!(ab, fingerprint_step(fingerprint_step(0, &a), &b2));
+        assert_ne!(ab, fingerprint_step(0, &a));
+    }
+
+    #[test]
+    fn boxed_sources_forward() {
+        let mut s: Box<dyn EntrySource<Error = std::convert::Infallible>> =
+            Box::new(VecSource::new(vec![(p("a"), f(b"1", 0o644))]));
+        assert!(s.next_entry().unwrap().is_some());
+        assert!(s.next_entry().unwrap().is_none());
     }
 
     #[test]

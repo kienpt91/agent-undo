@@ -21,13 +21,13 @@ pub mod ignore;
 pub mod secrets;
 
 pub mod change;
+pub mod diff;
 pub mod entry;
+pub mod env;
 pub mod error;
 pub mod journal;
 pub mod path;
 pub mod plan;
-pub mod units;
-pub mod diff;
-pub mod watch;
-pub mod env;
 pub mod policy;
+pub mod units;
+pub mod watch;
