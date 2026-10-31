@@ -9,6 +9,10 @@ repository.workspace = true
 publish.workspace = true
 readme = "../../README.md"
 
+[lib]
+name = "agent_undo_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "agent-undo"
 path = "src/main.rs"
