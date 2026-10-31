@@ -79,7 +79,7 @@ undoing the undo. Real output; timestamps and the temp directory name vary per r
 ```text
 $ agent-undo init
 initialized agent-undo for /tmp/demo/shop
-store: /tmp/demo/state/agent-undo/4b6c0314f72e059b
+store: /tmp/demo/state/agent-undo/a74bcd101fa07627
 baseline: checkpoint #1 (6 entries)
 
 $ agent-undo run --label "fake agent" -- sh agent.sh
@@ -87,11 +87,11 @@ agent-undo: checkpoint #2 (session 1): 2 created, 2 modified, 1 deleted, 1 mode-
 
 $ agent-undo log
 ID    SESSION  KIND       TIME (UTC)            CHANGES               EXIT    LABEL / COMMAND
-#1    1        baseline   2026-10-31T05:47:46Z +6 ~0 -0 m0           -       baseline
-#2    1        run        2026-10-31T05:47:46Z +2 ~2 -1 m1           0       fake agent: sh ./agent.sh
+#1    1        baseline   2026-10-31T06:40:57Z +6 ~0 -0 m0           -       baseline
+#2    1        run        2026-10-31T06:40:57Z +2 ~2 -1 m1           0       fake agent: sh ./agent.sh
 
 $ agent-undo diff 2
-checkpoint #2 (run, session 1) 2026-10-31T05:47:46Z  exit 0
+checkpoint #2 (run, session 1) 2026-10-31T06:40:57Z  exit 0
 label: fake agent
 command: sh ./agent.sh
 changes: 2 created, 2 modified, 1 deleted, 1 mode-changed
@@ -157,10 +157,10 @@ DB_PASSWORD=changed-by-the-agent
 
 $ agent-undo log
 ID    SESSION  KIND       TIME (UTC)            CHANGES               EXIT    LABEL / COMMAND
-#1    1        baseline   2026-10-31T05:47:46Z +6 ~0 -0 m0           -       baseline
-#2    1        run        2026-10-31T05:47:46Z +2 ~2 -1 m1           0       fake agent: sh ./agent.sh
-#3    1        pre-undo   2026-10-31T05:47:46Z +0 ~0 -0 m0           -       before: undo checkpoint #2
-#4    1        undo       2026-10-31T05:47:46Z +1 ~1 -2 m1           -       undo checkpoint #2
+#1    1        baseline   2026-10-31T06:40:57Z +6 ~0 -0 m0           -       baseline
+#2    1        run        2026-10-31T06:40:57Z +2 ~2 -1 m1           0       fake agent: sh ./agent.sh
+#3    1        pre-undo   2026-10-31T06:40:57Z +0 ~0 -0 m0           -       before: undo checkpoint #2
+#4    1        undo       2026-10-31T06:40:57Z +1 ~1 -2 m1           -       undo checkpoint #2
 
 $ agent-undo undo --last --apply     # undo the undo
 undo checkpoint #4 (applied)
@@ -193,7 +193,7 @@ USAGE:
 
 COMMANDS:
   init [--in-project] [--max-file-size SIZE]   create the store and record the baseline
-  run [--label L] [--new-session] [--env-allow NAMES]... -- CMD...
+  run [--label L] [--new-session] [--env-allow NAMES]... [--no-log-args] -- CMD...
                                                 record what CMD changes as one checkpoint
   checkpoint [--label L] [--new-session]       record the current state manually
   log [--session N]                            list checkpoints
@@ -356,11 +356,11 @@ of itself:
 
 | Layer | Kind | Tests |
 |---|---|---|
-| domain | pure unit and property-style tests (invariants, state transitions, events) | 196 |
-| application | use cases against in-memory fakes, asserting state and emitted events | 326 |
-| infrastructure | contract tests, each suite run against the fake **and** the filesystem adapter (143); unit tests (43); real-filesystem security tests (21) | 207 |
+| domain | pure unit and property-style tests (invariants, state transitions, events, redaction, detectors) | 218 |
+| application | use cases against in-memory fakes, asserting state and emitted events | 338 |
+| infrastructure | contract tests, each suite run against the fake **and** the filesystem adapter (167); unit tests (61); real-filesystem security and hardening tests (39) | 267 |
 | architecture | dependency rule, no IO in pure layers, no build scripts | 10 |
-| command line | argument/render unit tests (37) and end-to-end tests of the real binary (148) | 185 |
+| command line | argument/render unit tests (38) and end-to-end tests of the real binary (171) | 209 |
 | memory | counting allocator proof | 1 |
 
 Run them with `scripts/dev.sh scripts/layers.sh`. No test needs network access, and all
@@ -372,28 +372,29 @@ and `llvm-cov` from the official `llvm-tools-preview` component), test code excl
 
 ```text
 Line coverage by layer (llvm-cov; unit and integration test code excluded)
-domain         2650 lines     64 missed   97.58%
-app             860 lines     30 missed   96.51%
-infra          1596 lines    185 missed   88.41%
-cli            1647 lines     89 missed   94.60%
-app-fakes       727 lines     30 missed   95.87%
-overall        6753 lines    368 missed   94.55%   (all layers, fakes excluded)
+domain         2888 lines     71 missed   97.54%
+app             869 lines     33 missed   96.20%
+infra          1953 lines    231 missed   88.17%
+cli            1736 lines     88 missed   94.93%
+app-fakes       795 lines     32 missed   95.97%
+overall        7446 lines    423 missed   94.32%   (all layers, fakes excluded)
 
 Files below 90% line coverage (fakes excluded):
-  infra/src/layout.rs                              88.6% (26 of 229 lines missed)
-  infra/src/fs_tree.rs                             83.2% (86 of 511 lines missed)
-  infra/src/fs_journal.rs                          86.4% (11 of 81 lines missed)
+  infra/src/fs_sensitive.rs                        81.4% (11 of 59 lines missed)
+  infra/src/fs_tree.rs                             84.3% (105 of 668 lines missed)
   infra/src/fs_blobs.rs                            88.4% (16 of 138 lines missed)
   domain/src/error.rs                              55.6% (4 of 9 lines missed)
-  cli/src/doctor.rs                                85.2% (34 of 229 lines missed)
+  cli/src/doctor.rs                                85.0% (34 of 227 lines missed)
+  infra/src/fsutil.rs                              86.8% (27 of 204 lines missed)
   app/src/usecases/verify.rs                       89.6% (12 of 115 lines missed)
 ```
 
 Uncovered areas, not padded: error branches that need a failing disk (`fs_tree`,
-`fs_blobs`, `fs_journal`: I/O errors in the middle of a read or rename), the special-file
-and cross-device branches of the walker, the `layout` error paths for unreadable metadata,
-parts of `doctor` that depend on the host (root user, coarse timestamps), and a few
-defensive branches in `verify` that need the store to fail while it is being listed. The
+`fs_blobs`, `fs_sensitive`, `fsutil`: I/O errors in the middle of a read, write or
+rename), the special-file and cross-device branches of the walker, the macOS-only
+branch of `effective_uid`, parts of `doctor` that depend on the host (root user, coarse
+timestamps), and a few defensive branches in `verify` that need the store to fail while it
+is being listed. The
 files below 90% are listed in the table output above. The fakes in `crates/app/src/fakes.rs`
 are test support and are reported on their own line, not counted in the layers.
 
