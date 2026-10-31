@@ -27,3 +27,4 @@ pub mod journal;
 pub mod path;
 pub mod plan;
 pub mod units;
+pub mod diff;
