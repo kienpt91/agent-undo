@@ -295,6 +295,7 @@ pub fn diff_text(r: &DiffReport) -> String {
         out.push_str(&view_line(v));
         out.push('\n');
         match &v.content {
+            Content::Withheld("directory" | "symlink") => {}
             Content::Withheld(why) => out.push_str(&format!("    ({why})\n")),
             Content::Diff(DiffOutcome::Text(t)) => {
                 let name = p.display();
