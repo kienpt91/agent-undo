@@ -729,12 +729,11 @@ impl MemTree {
         }
     }
 
-    fn ignore_set(&self) -> IgnoreSet {
+    fn ignore_set(&self) -> Result<IgnoreSet> {
         match self.read(".agent-undoignore") {
-            Some(text) => {
-                IgnoreSet::with_user_patterns(&text).unwrap_or_else(|_| IgnoreSet::defaults())
-            }
-            None => IgnoreSet::defaults(),
+            Some(text) => IgnoreSet::with_user_patterns(&text)
+                .map_err(|e| Error::Format(format!(".agent-undoignore: {e}"))),
+            None => Ok(IgnoreSet::defaults()),
         }
     }
 
@@ -769,7 +768,7 @@ impl MemTree {
 
 impl WorkingTree for Rc<MemTree> {
     fn scan(&self, opts: &ScanOptions, visitor: &mut dyn ScanVisitor) -> Result<ScanStats> {
-        let ignore = self.ignore_set();
+        let ignore = self.ignore_set()?;
         let snapshot: Vec<(RelPath, Stamped)> = self
             .nodes
             .borrow()
@@ -956,6 +955,21 @@ impl WorkingTree for Rc<MemTree> {
     }
 
     fn set_dir_mode(&self, path: &RelPath, mode: u32) -> Result<()> {
+        if let Err((_, why)) = self.parents_are_safe(path) {
+            return Err(Error::Unsafe(why));
+        }
+        match self.nodes.borrow().get(path).map(|s| &s.node) {
+            Some(Node::Dir { .. }) => {}
+            Some(_) => {
+                return Err(Error::Unsafe(format!(
+                    "{} is no longer a directory",
+                    path.display()
+                )));
+            }
+            None => {
+                return Err(Error::Other(format!("{} does not exist", path.display())));
+            }
+        }
         self.chmod_rel(path, mode & 0o777);
         Ok(())
     }
