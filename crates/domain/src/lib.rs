@@ -19,3 +19,6 @@ pub mod esc;
 pub mod hash;
 pub mod ignore;
 pub mod secrets;
+
+pub mod error;
+pub mod units;
