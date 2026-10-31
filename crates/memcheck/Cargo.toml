@@ -1,0 +1,22 @@
+[package]
+name = "agent-undo-memcheck"
+description = "Test-only crate: proves the snapshot/verify/undo paths use bounded memory (counting global allocator)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+# Not a dependency of any shipped crate or of the binary.
+[dependencies]
+agent-undo-domain = { path = "../domain" }
+agent-undo-app = { path = "../app" }
+agent-undo-infra = { path = "../infra" }
+
+# Deliberately no `[lints] workspace = true`: the counting global allocator in
+# tests/memory.rs needs `unsafe impl GlobalAlloc`, which the workspace-wide
+# `unsafe_code = "forbid"` would reject. The library target of this crate
+# (src/lib.rs) is empty and carries its own `#![forbid(unsafe_code)]`; unsafe
+# exists only in this crate's integration test and is never linked into the
+# released binary.

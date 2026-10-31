@@ -29,3 +29,12 @@ dependencies = [
  "agent-undo-app",
  "agent-undo-domain",
 ]
+
+[[package]]
+name = "agent-undo-memcheck"
+version = "0.1.0"
+dependencies = [
+ "agent-undo-app",
+ "agent-undo-domain",
+ "agent-undo-infra",
+]

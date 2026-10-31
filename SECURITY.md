@@ -54,8 +54,9 @@ What it does **not** defend against:
 
 ## Code policy
 
-* `#![forbid(unsafe_code)]` in every crate. The only `unsafe` in the repository is the
-  counting global allocator in `crates/infra/tests/memory.rs`, a test-only crate.
+* `#![forbid(unsafe_code)]` in every shipped crate. The only `unsafe` in the repository is the
+  counting global allocator in `crates/memcheck/tests/memory.rs`; `agent-undo-memcheck` is a
+  test-only workspace member that no shipped crate or the binary depends on.
 * `unwrap`, `expect`, indexing and `panic!` are denied outside tests in every crate;
   arithmetic that can overflow on untrusted sizes is checked or saturating and
   `overflow-checks` is on in release builds.
