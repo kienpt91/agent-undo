@@ -13,4 +13,6 @@
 
 pub mod esc;
 pub mod hash;
+pub mod ignore;
 pub mod json;
+pub mod secrets;
