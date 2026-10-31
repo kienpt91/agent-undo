@@ -100,7 +100,10 @@ const SENSITIVE_PREFIXES: &[(&[u8], &str)] = &[
 /// that is treated as sensitive by name alone. Directory components such as
 /// `.ssh` or `.aws` make everything below them sensitive.
 pub fn sensitive_name(rel: &[u8]) -> Option<&'static str> {
-    let comps: Vec<&[u8]> = rel.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
+    let comps: Vec<&[u8]> = rel
+        .split(|&b| b == b'/')
+        .filter(|c| !c.is_empty())
+        .collect();
     let (name, parents) = comps.split_last()?;
     for dir in parents {
         if SENSITIVE_DIRS.iter().any(|d| eq_ci(dir, d)) {
@@ -125,7 +128,10 @@ pub fn sensitive_component_name(name: &[u8]) -> Option<&'static str> {
             return Some(why);
         }
     }
-    if starts_with_ci(name, b"service") && ends_with_ci(name, b".json") && name.windows(7).any(|w| w.eq_ignore_ascii_case(b"account")) {
+    if starts_with_ci(name, b"service")
+        && ends_with_ci(name, b".json")
+        && name.windows(7).any(|w| w.eq_ignore_ascii_case(b"account"))
+    {
         return Some("service account file");
     }
     None
@@ -206,7 +212,8 @@ fn all_alnum(s: &[u8]) -> bool {
 }
 
 fn all_b64url(s: &[u8]) -> bool {
-    s.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+    s.iter()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
 }
 
 fn rest_after<'a>(tok: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
@@ -232,7 +239,8 @@ fn token_rule(tok: &[u8]) -> Option<&'static str> {
     ] {
         if let Some(r) = rest_after(tok, p)
             && r.len() == 16
-            && r.iter().all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+            && r.iter()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
         {
             return Some("AWS access key id");
         }
@@ -304,7 +312,9 @@ fn token_rule(tok: &[u8]) -> Option<&'static str> {
         return Some("age secret key");
     }
     let mut parts = tok.split(|&b| b == b'.');
-    if let (Some(a), Some(b), Some(c), None) = (parts.next(), parts.next(), parts.next(), parts.next()) {
+    if let (Some(a), Some(b), Some(c), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    {
         if a == b"SG" && b.len() == 22 && c.len() == 43 && all_b64url(b) && all_b64url(c) {
             return Some("SendGrid key");
         }
@@ -366,7 +376,10 @@ fn looks_like_secret_value(v: &[u8]) -> bool {
 
 fn assignment_value_is_secret(line: &[u8], mut i: usize, bearer: bool) -> bool {
     if !bearer {
-        while line.get(i).is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-')) {
+        while line
+            .get(i)
+            .is_some_and(|&b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
             i += 1;
         }
     }
@@ -392,7 +405,10 @@ fn assignment_value_is_secret(line: &[u8], mut i: usize, bearer: bool) -> bool {
             i += 1;
         }
     }
-    while line.get(i).is_some_and(|&b| matches!(b, b' ' | b'\t' | b'"' | b'\'' | b'`')) {
+    while line
+        .get(i)
+        .is_some_and(|&b| matches!(b, b' ' | b'\t' | b'"' | b'\'' | b'`'))
+    {
         i += 1;
     }
     let rest = line.get(i..).unwrap_or(&[]);
@@ -537,7 +553,9 @@ mod tests {
 
     /// Deterministic pseudo-random string over `alphabet`, with one digit forced in.
     fn rnd(seed: u64, len: usize, alphabet: &[u8]) -> String {
-        let mut x = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        let mut x = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         let mut out = Vec::with_capacity(len);
         for _ in 0..len {
             x ^= x << 13;
@@ -561,7 +579,13 @@ mod tests {
 
     #[test]
     fn names_dotenv_variants() {
-        for n in [".env", ".env.local", ".env.production", "sub/dir/.env", ".ENV"] {
+        for n in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            "sub/dir/.env",
+            ".ENV",
+        ] {
             assert!(sensitive_name(n.as_bytes()).is_some(), "{n}");
         }
     }
@@ -607,7 +631,13 @@ mod tests {
 
     #[test]
     fn names_credential_directories() {
-        for n in [".ssh/config", ".aws/config", "home/.gnupg/pubring.kbx", "a/.kube/x", ".ssh/known_hosts"] {
+        for n in [
+            ".ssh/config",
+            ".aws/config",
+            "home/.gnupg/pubring.kbx",
+            "a/.kube/x",
+            ".ssh/known_hosts",
+        ] {
             assert!(sensitive_name(n.as_bytes()).is_some(), "{n}");
         }
     }
@@ -640,7 +670,14 @@ mod tests {
 
     #[test]
     fn private_key_headers() {
-        for kind in ["RSA PRIVATE", "EC PRIVATE", "OPENSSH PRIVATE", "PRIVATE", "ENCRYPTED PRIVATE", "DSA PRIVATE"] {
+        for kind in [
+            "RSA PRIVATE",
+            "EC PRIVATE",
+            "OPENSSH PRIVATE",
+            "PRIVATE",
+            "ENCRYPTED PRIVATE",
+            "DSA PRIVATE",
+        ] {
             let text = format!("junk\n-----BEGIN {kind} KEY-----\nabc\n");
             assert!(hit(&text), "{kind}");
         }
@@ -651,7 +688,9 @@ mod tests {
     fn public_material_is_not_flagged() {
         assert!(!hit(&format!("-----BEGIN {}-----\nMII", "CERTIFICATE")));
         assert!(!hit(&format!("-----BEGIN {} KEY-----", "PUBLIC")));
-        assert!(!hit("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample user@host"));
+        assert!(!hit(
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIexample user@host"
+        ));
     }
 
     #[test]
@@ -662,7 +701,8 @@ mod tests {
         // wrong length / lower case are not key ids
         let short = format!("{}{}", "AK", "IA") + &rnd(1, 10, UPPER_DIGIT);
         assert!(!hit(&format!("x = {short}")));
-        let lowercase = format!("{}{}", "AK", "IA").to_lowercase() + &rnd(1, 16, UPPER_DIGIT).to_lowercase();
+        let lowercase =
+            format!("{}{}", "AK", "IA").to_lowercase() + &rnd(1, 16, UPPER_DIGIT).to_lowercase();
         assert!(!hit(&lowercase));
     }
 
@@ -693,7 +733,9 @@ mod tests {
         // a hyphenated slug is not a key
         assert!(!hit("sk-this-is-just-a-very-long-hyphenated-slug-name"));
         // and a word that merely ends in sk- is not a token start
-        assert!(!hit("task-runner-configuration-for-the-build-pipeline-stage"));
+        assert!(!hit(
+            "task-runner-configuration-for-the-build-pipeline-stage"
+        ));
     }
 
     #[test]
@@ -710,7 +752,13 @@ mod tests {
     fn age_and_sendgrid() {
         let age = format!("{}{}", "AGE-SECRET", "-KEY-1") + &rnd(13, 58, UPPER_DIGIT);
         assert!(hit(&age));
-        let sg = format!("{}{}.{}.{}", "S", "G", rnd(14, 22, B64URL), rnd(15, 43, B64URL));
+        let sg = format!(
+            "{}{}.{}.{}",
+            "S",
+            "G",
+            rnd(14, 22, B64URL),
+            rnd(15, 43, B64URL)
+        );
         assert!(hit(&sg));
     }
 
@@ -728,12 +776,22 @@ mod tests {
     #[test]
     fn assignment_negatives() {
         assert!(!hit("password = \"changeme\""));
-        assert!(!hit("password = hash_password(user_input_value_that_is_long)"));
+        assert!(!hit(
+            "password = hash_password(user_input_value_that_is_long)"
+        ));
         assert!(!hit("token: ${{ secrets.GITHUB_TOKEN }}"));
-        assert!(!hit("const secret = process.env.JWT_SECRET_KEY_FOR_SIGNING_TOKENS;"));
-        assert!(!hit("let token = tokenizer.next_token_from_the_input_stream();"));
-        assert!(!hit("password_field_label = \"Enter your password here please\""));
-        assert!(!hit("the word password appears here but nothing is assigned"));
+        assert!(!hit(
+            "const secret = process.env.JWT_SECRET_KEY_FOR_SIGNING_TOKENS;"
+        ));
+        assert!(!hit(
+            "let token = tokenizer.next_token_from_the_input_stream();"
+        ));
+        assert!(!hit(
+            "password_field_label = \"Enter your password here please\""
+        ));
+        assert!(!hit(
+            "the word password appears here but nothing is assigned"
+        ));
     }
 
     #[test]
@@ -746,8 +804,13 @@ mod tests {
     #[test]
     fn url_credentials_detected() {
         let pw = rnd(17, 16, ALNUM);
-        assert!(hit(&format!("DATABASE_URL=postgres://app:{pw}@db.internal:5432/app")));
-        assert!(!hit("https://user:pass@example.com/"), "short placeholder password");
+        assert!(hit(&format!(
+            "DATABASE_URL=postgres://app:{pw}@db.internal:5432/app"
+        )));
+        assert!(
+            !hit("https://user:pass@example.com/"),
+            "short placeholder password"
+        );
         assert!(!hit("postgres://app:${DB_PASSWORD}@db/app"));
         assert!(!hit("https://example.com/path:with:colons@x"));
         assert!(!hit("see https://github.com/org/repo for details"));
@@ -782,7 +845,7 @@ mod tests {
     #[test]
     fn token_split_across_chunk_boundary_is_found() {
         let t = format!("{}{}", "gh", "p_") + &rnd(20, 36, ALNUM);
-        let text = format!("{}{}", "x".repeat(100), format!(" {t} tail"));
+        let text = format!("{} {t} tail", "x".repeat(100));
         let bytes = text.as_bytes();
         for split in [1, 50, 101, 105, 120, 130] {
             let mut s = Scanner::new();
@@ -817,7 +880,10 @@ mod tests {
     #[test]
     fn found_state_is_sticky() {
         let mut s = Scanner::new();
-        assert!(s.feed(format!("-----BEGIN {} KEY-----", "PRIVATE").as_bytes()).is_some());
+        assert!(
+            s.feed(format!("-----BEGIN {} KEY-----", "PRIVATE").as_bytes())
+                .is_some()
+        );
         assert!(s.feed(b"clean").is_some());
     }
 

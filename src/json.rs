@@ -153,7 +153,10 @@ mod tests {
 
     #[test]
     fn strings_are_escaped() {
-        assert_eq!(Json::from("a\"b\\c\n\u{1}").to_compact(), "\"a\\\"b\\\\c\\n\\u0001\"");
+        assert_eq!(
+            Json::from("a\"b\\c\n\u{1}").to_compact(),
+            "\"a\\\"b\\\\c\\n\\u0001\""
+        );
     }
 
     #[test]

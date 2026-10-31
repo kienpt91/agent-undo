@@ -51,13 +51,15 @@ fn escape_impl(bytes: &[u8], allow_tab: bool) -> String {
     while !rest.is_empty() {
         match std::str::from_utf8(rest) {
             Ok(s) => {
-                s.chars().for_each(|c| push_escaped_char(&mut out, c, allow_tab));
+                s.chars()
+                    .for_each(|c| push_escaped_char(&mut out, c, allow_tab));
                 break;
             }
             Err(e) => {
                 let (good, bad) = rest.split_at(e.valid_up_to());
                 if let Ok(s) = std::str::from_utf8(good) {
-                    s.chars().for_each(|c| push_escaped_char(&mut out, c, allow_tab));
+                    s.chars()
+                        .for_each(|c| push_escaped_char(&mut out, c, allow_tab));
                 }
                 let bad_len = e.error_len().unwrap_or(bad.len()).max(1);
                 let (invalid, after) = bad.split_at(bad_len.min(bad.len()));
@@ -90,7 +92,11 @@ pub fn display_str(s: &str) -> String {
 }
 
 fn pct_safe(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'/' | b'+' | b'@' | b'=' | b'~' | b':')
+    b.is_ascii_alphanumeric()
+        || matches!(
+            b,
+            b'.' | b'_' | b'-' | b'/' | b'+' | b'@' | b'=' | b'~' | b':'
+        )
 }
 
 /// Percent-encodes bytes for the on-disk text formats. The output contains only

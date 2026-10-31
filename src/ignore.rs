@@ -53,7 +53,10 @@ enum Tok {
     Lit(u8),
     Any,
     Star,
-    Class { negated: bool, ranges: Vec<(u8, u8)> },
+    Class {
+        negated: bool,
+        ranges: Vec<(u8, u8)>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -201,7 +204,10 @@ impl Pattern {
     fn parse(line: &[u8]) -> Option<Pattern> {
         // Strip trailing unescaped spaces.
         let mut end = line.len();
-        while end > 0 && line.get(end - 1) == Some(&b' ') && line.get(end.wrapping_sub(2)) != Some(&b'\\') {
+        while end > 0
+            && line.get(end - 1) == Some(&b' ')
+            && line.get(end.wrapping_sub(2)) != Some(&b'\\')
+        {
             end -= 1;
         }
         let mut line = line.get(..end)?;
@@ -228,7 +234,10 @@ impl Pattern {
         if line.is_empty() {
             return None;
         }
-        let parts: Vec<&[u8]> = line.split(|&b| b == b'/').filter(|s| !s.is_empty()).collect();
+        let parts: Vec<&[u8]> = line
+            .split(|&b| b == b'/')
+            .filter(|s| !s.is_empty())
+            .collect();
         if parts.is_empty() {
             return None;
         }
@@ -335,7 +344,9 @@ impl IgnoreSet {
         for raw in text.split(|&b| b == b'\n') {
             let line = raw.strip_suffix(b"\r").unwrap_or(raw);
             if line.len() > MAX_PATTERN_LEN {
-                return Err(format!("ignore pattern longer than {MAX_PATTERN_LEN} bytes"));
+                return Err(format!(
+                    "ignore pattern longer than {MAX_PATTERN_LEN} bytes"
+                ));
             }
             if let Some(p) = Pattern::parse(line) {
                 if self.patterns.len() >= DEFAULT_PATTERNS.len() + MAX_PATTERNS {
@@ -358,7 +369,10 @@ impl IgnoreSet {
     /// Whether `rel` (a `/`-separated path relative to the project root) is ignored.
     /// The last matching pattern wins; `!` patterns re-include.
     pub fn is_ignored(&self, rel: &[u8], is_dir: bool) -> bool {
-        let comps: Vec<&[u8]> = rel.split(|&b| b == b'/').filter(|c| !c.is_empty()).collect();
+        let comps: Vec<&[u8]> = rel
+            .split(|&b| b == b'/')
+            .filter(|c| !c.is_empty())
+            .collect();
         if comps.is_empty() {
             return false;
         }
@@ -402,7 +416,10 @@ mod tests {
         ] {
             assert!(ign(&s, d, true), "{d}");
         }
-        assert!(ign(&s, ".git", false), ".git file (worktree) is ignored too");
+        assert!(
+            ign(&s, ".git", false),
+            ".git file (worktree) is ignored too"
+        );
         assert!(!ign(&s, "src", true));
         assert!(!ign(&s, "src/main.rs", false));
     }
