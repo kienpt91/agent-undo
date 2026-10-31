@@ -63,6 +63,15 @@ const SENSITIVE_EXACT: &[&[u8]] = &[
     b"credentials",
     b"terraform.tfstate",
     b"terraform.tfvars",
+    b".vault-token",
+    b".boto",
+    b"kubeconfig",
+    b".bash_history",
+    b".zsh_history",
+    b".psql_history",
+    b".mysql_history",
+    b".dockerconfigjson",
+    b"wallet.dat",
 ];
 
 const SENSITIVE_SUFFIXES: &[(&[u8], &str)] = &[
@@ -76,6 +85,11 @@ const SENSITIVE_SUFFIXES: &[(&[u8], &str)] = &[
     (b".kdbx", "password database"),
     (b".ppk", "PuTTY private key"),
     (b".tfstate", "Terraform state"),
+    (b".tfvars", "Terraform variables"),
+    (b".p8", "private key (PKCS#8)"),
+    (b".gpg", "GPG key or encrypted file"),
+    (b".pgp", "PGP key or encrypted file"),
+    (b".kubeconfig", "Kubernetes credentials"),
     (b".secret", "secret file"),
     (b".secrets", "secret file"),
     (b"_credentials", "credentials file"),
@@ -420,6 +434,93 @@ fn assignment_value_is_secret(line: &[u8], mut i: usize, bearer: bool) -> bool {
     rest.get(..n).is_some_and(looks_like_secret_value)
 }
 
+const DOTENV_NAME_PARTS: &[&[u8]] = &[
+    b"SECRET",
+    b"PASSWORD",
+    b"PASSWD",
+    b"TOKEN",
+    b"API_KEY",
+    b"APIKEY",
+    b"PRIVATE_KEY",
+    b"ACCESS_KEY",
+    b"CREDENTIAL",
+    b"SIGNING_KEY",
+    b"ENCRYPTION_KEY",
+    b"MASTER_KEY",
+];
+
+/// Variable-name endings that describe where a secret lives or what it is called,
+/// not the secret itself (`PASSWORD_FILE`, `TOKEN_URL`, `ACCESS_KEY_ID`, ...).
+const DOTENV_NAME_NON_SECRET_ENDINGS: &[&[u8]] = &[
+    b"_FILE", b"_PATH", b"_URL", b"_URI", b"_NAME", b"_HEADER", b"_ENV", b"_FIELD", b"_LABEL",
+    b"_TYPE", b"_LENGTH", b"_TTL", b"_EXPIRY", b"_ID", b"_DIR", b"_HOST", b"_PORT",
+];
+
+fn contains_sub(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// `NAME=value` with an UPPER_SNAKE name that names a secret and a plausible
+/// literal value (6..=256 bytes, no whitespace, not a variable reference, a path,
+/// a URL without credentials or another variable's name). Unlike the entropy rule
+/// this also catches typical low-entropy passwords such as `DB_PASSWORD=hunter2`.
+fn dotenv_secret_line(line: &[u8]) -> bool {
+    let mut l = line.trim_ascii_start();
+    if let Some(rest) = l.strip_prefix(b"export ") {
+        l = rest.trim_ascii_start();
+    }
+    let name_len = l
+        .iter()
+        .take_while(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || **b == b'_')
+        .count();
+    let (name, rest) = l.split_at(name_len);
+    if name.len() < 3
+        || !name
+            .first()
+            .is_some_and(|b| b.is_ascii_uppercase() || *b == b'_')
+    {
+        return false;
+    }
+    if !DOTENV_NAME_PARTS.iter().any(|p| contains_sub(name, p)) {
+        return false;
+    }
+    if DOTENV_NAME_NON_SECRET_ENDINGS
+        .iter()
+        .any(|e| name.ends_with(e))
+    {
+        return false;
+    }
+    let rest = rest.trim_ascii_start();
+    let Some(value) = rest.strip_prefix(b"=") else {
+        return false;
+    };
+    let mut v = value.trim_ascii();
+    if let Some(q) = v
+        .first()
+        .copied()
+        .filter(|b| matches!(b, b'"' | b'\'' | b'`'))
+        && v.len() >= 2
+        && v.last() == Some(&q)
+    {
+        v = v.get(1..v.len() - 1).unwrap_or(v);
+    }
+    if !(6..=256).contains(&v.len()) || v.iter().any(u8::is_ascii_whitespace) {
+        return false;
+    }
+    if matches!(
+        v.first(),
+        Some(b'$' | b'{' | b'<' | b'%' | b'(' | b'*' | b'/' | b'.' | b'#')
+    ) {
+        return false;
+    }
+    let lower = v.to_ascii_lowercase();
+    if lower.starts_with(b"http://") || lower.starts_with(b"https://") {
+        return false;
+    }
+    // Another variable's name, not a secret.
+    !v.iter().all(|b| b.is_ascii_uppercase() || *b == b'_')
+}
+
 fn assignment_secret(line: &[u8]) -> bool {
     for kw in KEYWORDS {
         let bearer = *kw == b"bearer";
@@ -483,6 +584,9 @@ fn scan_window(buf: &[u8]) -> Option<&'static str> {
         }
         if assignment_secret(line) {
             return Some("high-entropy value assigned to a secret-like name");
+        }
+        if dotenv_secret_line(line) {
+            return Some("value assigned to a secret-named variable");
         }
         if url_credentials(line) {
             return Some("credentials embedded in a URL");

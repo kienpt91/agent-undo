@@ -342,3 +342,81 @@ fn entropy_values() {
     assert_eq!(shannon_entropy(b"aaaa"), 0.0);
     assert!((shannon_entropy(b"abcd") - 2.0).abs() < 1e-9);
 }
+
+// ---- SU-001: names and low-entropy dotenv-style assignments
+
+#[test]
+fn more_secret_bearing_names() {
+    for n in [
+        "AuthKey_ABC123.p8",
+        "secring.gpg",
+        "backup.pgp",
+        ".vault-token",
+        ".boto",
+        "kubeconfig",
+        "prod.kubeconfig",
+        ".bash_history",
+        ".zsh_history",
+        ".psql_history",
+        ".mysql_history",
+        "prod.tfvars",
+        "wallet.dat",
+        ".dockerconfigjson",
+        "sub/dir/.vault-token",
+    ] {
+        assert!(sensitive_name(n.as_bytes()).is_some(), "{n}");
+    }
+    for n in ["history.md", "kubeconfig.rs", "tokens.rs", "gpg-notes.txt"] {
+        assert!(sensitive_name(n.as_bytes()).is_none(), "{n}");
+    }
+}
+
+#[test]
+fn dotenv_style_low_entropy_values_are_flagged() {
+    for line in [
+        "DB_PASSWORD=hunter2",
+        "export API_TOKEN=abc12345",
+        "SECRET_KEY=\"s3cr3t-value\"",
+        "  AWS_SECRET_ACCESS_KEY='wJalr1234'",
+        "STRIPE_SECRET=sk_notreal",
+        "REDIS_PASSWD = changeit1",
+    ] {
+        assert!(hit(line), "{line}");
+        assert!(
+            hit(&format!("# config\nOTHER=1\n{line}\nMORE=2\n")),
+            "{line} inside a file"
+        );
+    }
+}
+
+#[test]
+fn dotenv_rule_ignores_references_paths_ids_and_short_values() {
+    for line in [
+        "DB_PASSWORD=$DATABASE_PASSWORD",
+        "DB_PASSWORD=${DB_PASSWORD}",
+        "DB_PASSWORD=<your password>",
+        "DB_PASSWORD=%DB_PASSWORD%",
+        "PASSWORD_FILE=/run/secrets/db_password",
+        "TOKEN_URL=https://example.com/oauth/token",
+        "SECRET_NAME=prod-db",
+        "API_KEY_HEADER=X-Api-Key",
+        "ACCESS_KEY_ID=short",
+        "PASSWORD_MIN_LENGTH=12",
+        "TOKEN=abc",
+        "SECRET=",
+        "API_KEY=STRIPE_SECRET_KEY",
+        "PASSWORD=",
+        "password=lowercase-names-are-not-dotenv",
+        "const PASSWORD_LABEL = 'Enter password';",
+        "DB_PASSWORD=has spaces in the value",
+    ] {
+        assert!(!hit(line), "{line}");
+    }
+}
+
+#[test]
+fn ordinary_config_files_are_not_flagged_by_the_dotenv_rule() {
+    let cfg =
+        "PORT=8080\nHOST=localhost\nLOG_LEVEL=debug\nTIMEOUT_SECONDS=30\nDATABASE_NAME=shop\n";
+    assert!(!hit(cfg));
+}
