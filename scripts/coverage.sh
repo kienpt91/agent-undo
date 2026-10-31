@@ -22,30 +22,29 @@ for f in "$CARGO_TARGET_DIR"/debug/deps/*; do
 done
 objs="$objs -object $CARGO_TARGET_DIR/debug/agent-undo"
 ignore='(/tests/|/tests\.rs$|/\.cargo/|/rustc/|/registry/)'
-report() { # name, then source paths
-  name=$1; shift
-  # shellcheck disable=SC2086
-  "$bin/llvm-cov" report $objs -instr-profile=/tmp/cov/all.profdata \
-    --ignore-filename-regex="$ignore" "$@" 2>/dev/null |
-    awk -v name="$name" '/^TOTAL/ { printf "%-16s lines %6d  missed %5d  cover %s   functions %s\n", name, $8, $9, $10, $7 }'
-}
-w=$(pwd)
-echo
-echo "Line coverage (llvm-cov, test code excluded)"
-report "domain" "$w/crates/domain/src"
-report "application" "$w/crates/app/src/error.rs" "$w/crates/app/src/events.rs" "$w/crates/app/src/ports.rs" "$w/crates/app/src/usecases"
-report "app fakes" "$w/crates/app/src/fakes.rs"
-report "infrastructure" "$w/crates/infra/src"
-report "cli" "$w/crates/cli/src"
-echo
-# overall = everything except fakes (test support)
 # shellcheck disable=SC2086
 "$bin/llvm-cov" report $objs -instr-profile=/tmp/cov/all.profdata \
-  --ignore-filename-regex="$ignore|fakes\.rs" "$w/crates" 2>/dev/null |
-  awk '/^TOTAL/ { printf "%-16s lines %6d  missed %5d  cover %s   functions %s\n", "overall", $8, $9, $10, $7 }'
+  --ignore-filename-regex="$ignore" 2>/dev/null > /tmp/cov/report.txt
 echo
-echo "Per-file line coverage below 90% (excluding fakes):"
-# shellcheck disable=SC2086
-"$bin/llvm-cov" report $objs -instr-profile=/tmp/cov/all.profdata \
-  --ignore-filename-regex="$ignore|fakes\.rs" "$w/crates" 2>/dev/null |
-  awk 'NR>2 && $1 ~ /crates/ { c=$10; sub("%","",c); if (c+0 < 90) printf "  %-60s %s (missed %s of %s lines)\n", $1, $10, $9, $8 }'
+echo "Line coverage by layer (llvm-cov; unit and integration test code excluded)"
+awk '
+  NR > 2 && $1 ~ /\/src\// {
+    split($1, parts, "/"); layer = parts[1]
+    if ($1 ~ /fakes\.rs$/) layer = "app-fakes"
+    lines[layer] += $8; missed[layer] += $9
+    if (layer != "app-fakes") { tl += $8; tm += $9 }
+    if ($8 > 0) { c = ($8 - $9) * 100 / $8; if (c < 90 && layer != "app-fakes") low[$1] = sprintf("%.1f%% (%d of %d lines missed)", c, $9, $8) }
+  }
+  END {
+    order[1] = "domain"; order[2] = "app"; order[3] = "infra"; order[4] = "cli"; order[5] = "app-fakes"
+    for (i = 1; i <= 5; i++) {
+      l = order[i]
+      if (lines[l] > 0) printf "%-12s %6d lines  %5d missed  %6.2f%%\n", l, lines[l], missed[l], (lines[l] - missed[l]) * 100 / lines[l]
+    }
+    printf "%-12s %6d lines  %5d missed  %6.2f%%   (all layers, fakes excluded)\n", "overall", tl, tm, (tl - tm) * 100 / tl
+    print ""
+    print "Files below 90% line coverage (fakes excluded):"
+    n = 0
+    for (f in low) { printf "  %-48s %s\n", f, low[f]; n++ }
+    if (n == 0) print "  none"
+  }' /tmp/cov/report.txt

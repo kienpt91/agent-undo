@@ -374,6 +374,11 @@ impl Proj {
             .env("XDG_STATE_HOME", &self.state)
             .current_dir(dir)
             .args(args);
+        // When the suite runs under coverage instrumentation, let the spawned binary
+        // write its profile next to the test binaries' (never into the project dir).
+        if let Some(p) = std::env::var_os("LLVM_PROFILE_FILE") {
+            c.env("LLVM_PROFILE_FILE", p);
+        }
         for (k, v) in extra_env {
             c.env(k, v);
         }
