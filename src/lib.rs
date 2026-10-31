@@ -14,9 +14,11 @@
 pub mod entry;
 pub mod error;
 pub mod esc;
+pub mod fsops;
 pub mod hash;
 pub mod ignore;
 pub mod json;
 pub mod paths;
 pub mod secrets;
+pub mod store;
 pub mod util;
