@@ -13,3 +13,4 @@
 
 pub mod args;
 pub mod json;
+pub mod render;
