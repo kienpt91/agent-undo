@@ -56,11 +56,14 @@ fn label_is_bounded() {
 #[test]
 fn command_line_truncates_with_marker() {
     let args: Vec<Vec<u8>> = (0..1000).map(|_| vec![b'a'; 100]).collect();
-    let c = CommandLine::bounded(&args);
+    let c = CommandLine::recorded(&args, ArgPolicy::Redact);
     assert!(c.args().len() < 100);
     assert_eq!(c.args().last().unwrap(), b"...[truncated]");
     let small = vec![b"ls".to_vec()];
-    assert_eq!(CommandLine::bounded(&small).args(), small.as_slice());
+    assert_eq!(
+        CommandLine::recorded(&small, ArgPolicy::Redact).args(),
+        small.as_slice()
+    );
 }
 
 #[test]
@@ -182,11 +185,14 @@ fn record_text_round_trip_including_hostile_text() {
     j.record(nc(CkptKind::Baseline, 1, 0)).unwrap();
     let mut n = nc(CkptKind::Run, 2, 1);
     n.label = Some(Label::new(b"my label\n\x1b[0m".to_vec()).unwrap());
-    n.command = Some(CommandLine::bounded(&[
-        b"sh".to_vec(),
-        b"-c".to_vec(),
-        b"echo hi; \x1b[0m\t".to_vec(),
-    ]));
+    n.command = Some(CommandLine::recorded(
+        &[
+            b"sh".to_vec(),
+            b"-c".to_vec(),
+            b"echo hi; \x1b[0m\t".to_vec(),
+        ],
+        ArgPolicy::Redact,
+    ));
     n.exit = Some(ExitInfo::Signal(9));
     let (rec, _) = j.record(n).unwrap();
     let line = rec.encode();
@@ -529,4 +535,52 @@ fn kind_names_round_trip() {
         assert_eq!(CkptKind::parse(k.as_str()), Some(k));
     }
     assert_eq!(CkptKind::parse("x"), None);
+}
+
+#[test]
+fn recorded_command_lines_are_redacted_before_they_reach_the_journal() {
+    let token = format!("{}{}", "gh", "p_") + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8";
+    let args = vec![
+        b"deploy".to_vec(),
+        b"--password".to_vec(),
+        b"hunter2".to_vec(),
+        token.clone().into_bytes(),
+    ];
+    let c = CommandLine::recorded(&args, ArgPolicy::Redact);
+    let joined: Vec<u8> = c.args().concat();
+    assert!(!joined.windows(7).any(|w| w == b"hunter2"));
+    assert!(!joined.windows(token.len()).any(|w| w == token.as_bytes()));
+    assert_eq!(c.args().len(), 4);
+    assert_eq!(c.args().first(), Some(&b"deploy".to_vec()));
+}
+
+#[test]
+fn omit_policy_keeps_only_the_program_name() {
+    let c = CommandLine::recorded(
+        &[b"tool".to_vec(), b"--token".to_vec(), b"x".to_vec()],
+        ArgPolicy::Omit,
+    );
+    assert_eq!(c.args(), &[b"tool".to_vec(), b"[args omitted]".to_vec()]);
+    let bare = CommandLine::recorded(&[b"tool".to_vec()], ArgPolicy::Omit);
+    assert_eq!(bare.args(), &[b"tool".to_vec()]);
+    assert!(
+        CommandLine::recorded(&[], ArgPolicy::Omit)
+            .args()
+            .is_empty()
+    );
+}
+
+#[test]
+fn user_labels_that_look_like_secrets_are_redacted_but_system_labels_are_not() {
+    assert_eq!(
+        Label::user(b"fix tests".to_vec()).unwrap().as_bytes(),
+        b"fix tests"
+    );
+    assert_eq!(
+        Label::user(b"DB_PASSWORD=hunter2".to_vec())
+            .unwrap()
+            .as_bytes(),
+        b"[redacted]"
+    );
+    assert!(Label::user(vec![b'a'; MAX_LABEL_BYTES + 1]).is_err());
 }

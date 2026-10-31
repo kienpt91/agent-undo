@@ -87,22 +87,51 @@ impl Label {
         Ok(Label(b))
     }
 
+    /// A label typed by the user: text that matches the secret detectors is replaced.
+    pub fn user(bytes: impl Into<Vec<u8>>) -> DomainResult<Label> {
+        Label::new(crate::redact::redact_label(&bytes.into()))
+    }
+
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
 
-/// The command line of a `run` checkpoint, truncated to a bounded size.
+/// How the arguments of a wrapped command are recorded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArgPolicy {
+    /// Record them with secrets redacted ([`crate::redact`]).
+    Redact,
+    /// Record the program name only (`run --no-log-args`).
+    Omit,
+}
+
+/// The command line of a `run` checkpoint, redacted and truncated to a bounded size.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandLine(Vec<Vec<u8>>);
 
 impl CommandLine {
-    /// Keeps whole arguments while the total stays within [`MAX_COMMAND_BYTES`];
-    /// a final `...[truncated]` argument marks the cut.
-    pub fn bounded(args: &[Vec<u8>]) -> CommandLine {
+    /// Builds the recorded form of `args`. Secrets are redacted first; then whole
+    /// arguments are kept while the total stays within [`MAX_COMMAND_BYTES`] and a
+    /// final `...[truncated]` argument marks the cut.
+    pub fn recorded(args: &[Vec<u8>], policy: ArgPolicy) -> CommandLine {
+        let shown: Vec<Vec<u8>> = match policy {
+            ArgPolicy::Redact => crate::redact::redact_args(args),
+            ArgPolicy::Omit => args
+                .first()
+                .map(|p| crate::redact::redact_args(std::slice::from_ref(p)))
+                .into_iter()
+                .flatten()
+                .chain(
+                    args.get(1..)
+                        .filter(|r| !r.is_empty())
+                        .map(|_| b"[args omitted]".to_vec()),
+                )
+                .collect(),
+        };
         let mut out = Vec::new();
         let mut total = 0usize;
-        for a in args {
+        for a in &shown {
             total = total.saturating_add(a.len() + 1);
             if total > MAX_COMMAND_BYTES {
                 out.push(b"...[truncated]".to_vec());

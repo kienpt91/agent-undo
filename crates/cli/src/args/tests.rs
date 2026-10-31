@@ -78,6 +78,7 @@ fn run_collects_command_after_double_dash() {
             label: Some(b"fix".to_vec()),
             new_session: true,
             env_allow: vec!["A,B".into()],
+            no_log_args: false,
             args: vec![
                 b"sh".to_vec(),
                 b"-c".to_vec(),
@@ -293,4 +294,17 @@ fn error_messages_escape_hostile_arguments() {
 fn is_helper() {
     assert!(is(OsStr::new("x"), "x"));
     assert!(!is(OsStr::new("x"), "y"));
+}
+
+#[test]
+fn run_no_log_args_flag() {
+    let c = cmd(&["run", "--no-log-args", "--", "tool", "--token", "x"]);
+    assert!(matches!(c, Command::Run { no_log_args: true, ref args, .. } if args.len() == 3));
+    assert!(matches!(
+        cmd(&["run", "--", "tool"]),
+        Command::Run {
+            no_log_args: false,
+            ..
+        }
+    ));
 }

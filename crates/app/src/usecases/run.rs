@@ -6,7 +6,9 @@ use crate::error::Error;
 use crate::events::Event;
 use crate::ports::{Ports, RunOutcome, RunRequest, ScanStats};
 use agent_undo_domain::env::EnvPolicy;
-use agent_undo_domain::journal::{CheckpointRecord, CkptKind, CommandLine, ExitInfo, Label};
+use agent_undo_domain::journal::{
+    ArgPolicy, CheckpointRecord, CkptKind, CommandLine, ExitInfo, Label,
+};
 
 #[derive(Debug, Clone)]
 pub struct RunCommand {
@@ -14,6 +16,8 @@ pub struct RunCommand {
     pub label: Option<Label>,
     pub new_session: bool,
     pub env: EnvPolicy,
+    /// How the command line is recorded (redacted, or program name only).
+    pub arg_policy: ArgPolicy,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +34,12 @@ pub struct RunReport {
 pub enum RunFailure {
     NotFound,
     CannotExecute(String),
+    /// The command ran and exited, but the checkpoint for it could not be recorded.
+    /// The command's own status is preserved so a wrapper still sees it.
+    NotRecorded {
+        exit: ExitInfo,
+        error: Error,
+    },
     Internal(Error),
 }
 
@@ -89,13 +99,15 @@ pub fn run_command(
     // 3. Record what the command did.
     let mut after = CheckpointRequest::new(CkptKind::Run);
     after.label = cmd.label;
-    after.command = Some(CommandLine::bounded(&cmd.args));
+    after.command = Some(CommandLine::recorded(&cmd.args, cmd.arg_policy));
     after.exit = Some(exit);
     after.new_session = new_session_left;
-    let out = record_checkpoint(ports, &mut journal, after)?;
-    let checkpoint = out
-        .record
-        .ok_or_else(|| Error::Other("internal error: run checkpoint was not recorded".into()))?;
+    let out = record_checkpoint(ports, &mut journal, after)
+        .map_err(|error| RunFailure::NotRecorded { exit, error })?;
+    let checkpoint = out.record.ok_or_else(|| RunFailure::NotRecorded {
+        exit,
+        error: Error::Other("internal error: run checkpoint was not recorded".into()),
+    })?;
     Ok(RunReport {
         external: external.record,
         checkpoint,

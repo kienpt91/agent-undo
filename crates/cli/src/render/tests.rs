@@ -1,6 +1,6 @@
 use super::*;
 use agent_undo_domain::hash::sha256;
-use agent_undo_domain::journal::{CkptKind, CommandLine, Label, NewCheckpoint};
+use agent_undo_domain::journal::{ArgPolicy, CkptKind, CommandLine, Label, NewCheckpoint};
 
 fn journal() -> Journal {
     let mut j = Journal::empty();
@@ -27,11 +27,10 @@ fn journal() -> Journal {
         5,
     );
     n.label = Some(Label::new(b"fix \x1b[31mtests".to_vec()).unwrap());
-    n.command = Some(CommandLine::bounded(&[
-        b"sh".to_vec(),
-        b"-c".to_vec(),
-        b"echo \x07hi".to_vec(),
-    ]));
+    n.command = Some(CommandLine::recorded(
+        &[b"sh".to_vec(), b"-c".to_vec(), b"echo \x07hi".to_vec()],
+        ArgPolicy::Redact,
+    ));
     n.exit = Some(ExitInfo::Code(3));
     j.record(n).unwrap();
     j

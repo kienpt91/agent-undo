@@ -230,6 +230,7 @@ fn cmd(args: &[&str]) -> RunCommand {
         label: None,
         new_session: false,
         env: EnvPolicy::Inherit,
+        arg_policy: agent_undo_domain::journal::ArgPolicy::Redact,
     }
 }
 
@@ -1619,6 +1620,7 @@ fn run_command_line_with_hostile_arguments_round_trips_through_the_journal() {
         label: None,
         new_session: false,
         env: EnvPolicy::Inherit,
+        arg_policy: agent_undo_domain::journal::ArgPolicy::Redact,
     };
     let rep = run(&w, c).unwrap();
     assert_eq!(rep.checkpoint.command.as_ref().unwrap().args(), &args[..]);

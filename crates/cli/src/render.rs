@@ -42,6 +42,13 @@ pub fn error_json(e: &Error) -> Json {
     )
 }
 
+/// `run --json` output when the command ran but its checkpoint could not be recorded.
+pub fn run_not_recorded_json(e: &Error, exit_status: i32) -> Json {
+    error_json(e)
+        .with("exit_status", i64::from(exit_status))
+        .with("recorded", false)
+}
+
 // ------------------------------------------------------------------ pieces
 
 pub fn counts_text(c: &Counts) -> String {

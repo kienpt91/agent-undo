@@ -44,6 +44,8 @@ pub enum Command {
         label: Option<Vec<u8>>,
         new_session: bool,
         env_allow: Vec<String>,
+        /// Record only the program name, not its arguments.
+        no_log_args: bool,
         args: Vec<Vec<u8>>,
     },
     Checkpoint {
@@ -243,11 +245,13 @@ fn parse_command(name: &str, rest: Vec<OsString>) -> Result<Command> {
         }
         "run" => {
             let (mut label, mut new_session, mut env_allow) = (None, false, Vec::new());
+            let mut no_log_args = false;
             let mut cmd: Option<Vec<Vec<u8>>> = None;
             while let Some(x) = a.next() {
                 match x.to_str() {
                     Some("--label") => label = Some(parse_label(a.value("--label")?)),
                     Some("--new-session") => new_session = true,
+                    Some("--no-log-args") => no_log_args = true,
                     Some("--env-allow") => env_allow.push(a.text("--env-allow")?),
                     Some("--") => {
                         cmd = Some(a.items.by_ref().map(OsString::into_vec).collect());
@@ -270,6 +274,7 @@ fn parse_command(name: &str, rest: Vec<OsString>) -> Result<Command> {
                 label,
                 new_session,
                 env_allow,
+                no_log_args,
                 args,
             })
         }

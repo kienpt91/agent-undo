@@ -57,6 +57,7 @@ fn run_noop(w: &World) -> agent_undo_app::usecases::run::RunReport {
                 label: None,
                 new_session: false,
                 env: EnvPolicy::Inherit,
+                arg_policy: agent_undo_domain::journal::ArgPolicy::Redact,
             },
         )
     })
@@ -1626,6 +1627,7 @@ fn tampered_journal_makes_run_fail_with_integrity_and_never_runs_the_command() {
                     label: None,
                     new_session: false,
                     env: EnvPolicy::Inherit,
+                    arg_policy: agent_undo_domain::journal::ArgPolicy::Redact,
                 },
             )
         })

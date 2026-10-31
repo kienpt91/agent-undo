@@ -431,19 +431,60 @@ fn run_with_a_corrupt_store_exits_125_while_other_commands_exit_1() {
 }
 
 #[test]
-fn run_with_an_unwritable_store_exits_125() {
+fn run_with_an_unwritable_store_reports_the_commands_status_and_that_nothing_was_recorded() {
     if is_root() {
         eprintln!("skipped: permission checks are bypassed for root");
         return;
     }
-    let p = Proj::inited("run-125-perms");
+    let p = Proj::inited("run-norecord");
     let store = p.store();
     let cps = store.join("checkpoints");
     fs::set_permissions(&cps, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
-    let o = p.run(&["run", "--", "sh", "-c", "echo x > f.txt"]);
+    let o = p.run(&["run", "--", "sh", "-c", "echo x > f.txt; exit 3"]);
+    fs::set_permissions(&cps, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    // The command ran, so its own status is reported (not 125) and the error says
+    // plainly that no checkpoint exists for it.
+    assert_eq!(o.code, 3, "{}", o.all());
+    assert!(p.exists("f.txt"));
+    assert!(
+        o.stderr.contains("no checkpoint could be recorded"),
+        "{}",
+        o.stderr
+    );
+}
+
+#[test]
+fn run_json_with_an_unwritable_store_carries_the_exit_status() {
+    if is_root() {
+        eprintln!("skipped: permission checks are bypassed for root");
+        return;
+    }
+    let p = Proj::inited("run-norecord-json");
+    let cps = p.store().join("checkpoints");
+    fs::set_permissions(&cps, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+    let o = p.run(&["--json", "run", "--", "sh", "-c", "echo x > f.txt; exit 4"]);
+    fs::set_permissions(&cps, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    assert_eq!(o.code, 4, "{}", o.all());
+    let j = o.stderr_last_json();
+    assert!(!j.p("ok").bool());
+    assert!(!j.p("recorded").bool());
+    assert_eq!(j.p("exit_status").u64(), 4);
+}
+
+#[test]
+fn run_exits_125_without_running_the_command_when_the_before_snapshot_cannot_be_stored() {
+    if is_root() {
+        eprintln!("skipped: permission checks are bypassed for root");
+        return;
+    }
+    let p = Proj::inited("run-125-before");
+    p.write("pending.txt", "edited by hand");
+    let cps = p.store().join("checkpoints");
+    fs::set_permissions(&cps, std::os::unix::fs::PermissionsExt::from_mode(0o500)).unwrap();
+    let o = p.run(&["run", "--", "sh", "-c", "echo ran > ran.txt"]);
     fs::set_permissions(&cps, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     assert_eq!(o.code, 125, "{}", o.all());
-    assert!(o.stderr.contains("agent-undo: error:"), "{}", o.stderr);
+    assert!(!p.exists("ran.txt"), "the command must not run unrecorded");
 }
 
 #[test]

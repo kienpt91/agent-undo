@@ -29,5 +29,6 @@ pub mod journal;
 pub mod path;
 pub mod plan;
 pub mod policy;
+pub mod redact;
 pub mod units;
 pub mod watch;

@@ -18,7 +18,7 @@ use agent_undo_domain::entry::{Entry, Kind};
 use agent_undo_domain::hash::{Digest, sha256};
 use agent_undo_domain::journal::CkptKind;
 use agent_undo_domain::journal::{
-    CheckpointId, CheckpointRecord, CommandLine, ExitInfo, Journal, Label, MAX_LABEL_BYTES,
+    ArgPolicy, CheckpointId, CheckpointRecord, CommandLine, ExitInfo, Journal, Label, MAX_LABEL_BYTES,
     NewCheckpoint,
 };
 use agent_undo_domain::path::RelPath;
@@ -985,7 +985,7 @@ fn chain() -> Vec<CheckpointRecord> {
     );
     run.new_session = true;
     run.label = Some(Label::new(b"nightly run".to_vec()).unwrap());
-    run.command = Some(CommandLine::bounded(&[b"echo".to_vec(), b"a b".to_vec()]));
+    run.command = Some(CommandLine::recorded(&[b"echo".to_vec(), b"a b".to_vec()], ArgPolicy::Redact));
     run.exit = Some(ExitInfo::Code(3));
     out.push(seal(&mut j, run));
 
@@ -999,7 +999,7 @@ fn chain() -> Vec<CheckpointRecord> {
 
     let mut killed = cp(CkptKind::Run, 5, Counts::default(), 6);
     killed.exit = Some(ExitInfo::Signal(9));
-    killed.command = Some(CommandLine::bounded(&[b"sleep".to_vec(), b"100".to_vec()]));
+    killed.command = Some(CommandLine::recorded(&[b"sleep".to_vec(), b"100".to_vec()], ArgPolicy::Redact));
     out.push(seal(&mut j, killed));
     out
 }
@@ -1151,7 +1151,7 @@ pub fn journal_hostile_text_roundtrips<J: JournalFixture>(make: impl Fn() -> J) 
     for (i, label) in labels.iter().enumerate() {
         let mut n = cp(CkptKind::Manual, i as i64 + 2, Counts::default(), 1);
         n.label = Some(Label::new(label.clone()).unwrap());
-        n.command = Some(CommandLine::bounded(&commands[i % commands.len()]));
+        n.command = Some(CommandLine::recorded(&commands[i % commands.len()], ArgPolicy::Redact));
         let r = seal(&mut j, n);
         repo.append(&r).unwrap();
         expected.push(r);

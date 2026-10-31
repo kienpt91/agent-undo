@@ -17,7 +17,9 @@ use agent_undo_app::usecases::verify::verify;
 use agent_undo_app::usecases::watch::watch_tick;
 use agent_undo_domain::env::EnvPolicy;
 use agent_undo_domain::esc::display;
-use agent_undo_domain::journal::{CheckpointId, Label, RetentionPolicy, Selector, SessionId};
+use agent_undo_domain::journal::{
+    ArgPolicy, CheckpointId, Label, RetentionPolicy, Selector, SessionId,
+};
 use agent_undo_domain::watch::Debouncer;
 use agent_undo_infra::fsutil::{display_path, rel_from_arg};
 use agent_undo_infra::layout::{
@@ -39,7 +41,7 @@ USAGE:
 
 COMMANDS:
   init [--in-project] [--max-file-size SIZE]   create the store and record the baseline
-  run [--label L] [--new-session] [--env-allow NAMES]... -- CMD...
+  run [--label L] [--new-session] [--env-allow NAMES]... [--no-log-args] -- CMD...
                                                 record what CMD changes as one checkpoint
   checkpoint [--label L] [--new-session]       record the current state manually
   log [--session N]                            list checkpoints
@@ -106,7 +108,7 @@ fn open_project(cli: &Cli) -> Result<Project> {
 }
 
 fn label_of(l: Option<Vec<u8>>) -> Result<Option<Label>> {
-    l.map(|b| Label::new(b).map_err(Error::from)).transpose()
+    l.map(|b| Label::user(b).map_err(Error::from)).transpose()
 }
 
 fn id_of(n: u64) -> Result<CheckpointId> {
@@ -234,6 +236,7 @@ fn cmd_run(
     label: Option<Vec<u8>>,
     new_session: bool,
     env_allow: &[String],
+    no_log_args: bool,
     args: &[Vec<u8>],
 ) -> i32 {
     let go = || -> std::result::Result<_, RunFailure> {
@@ -248,6 +251,11 @@ fn cmd_run(
             label: label_of(label)?,
             new_session,
             env,
+            arg_policy: if no_log_args {
+                ArgPolicy::Omit
+            } else {
+                ArgPolicy::Redact
+            },
         };
         run_command(&project.ports(), cmd)
     };
@@ -296,6 +304,22 @@ fn cmd_run(
                         display(why.as_bytes())
                     )),
                 ),
+                RunFailure::NotRecorded {
+                    exit: status,
+                    error,
+                } => {
+                    // The command ran: report its own status, not 125, and say plainly
+                    // that nothing was recorded for it.
+                    let code = status.status_code();
+                    if cli.json {
+                        io.errln(&render::run_not_recorded_json(&error, code).to_compact());
+                    } else {
+                        io.errln(&format!(
+                            "agent-undo: error: the command exited with status {code} but no checkpoint could be recorded for it: {error}"
+                        ));
+                    }
+                    return code;
+                }
                 RunFailure::Internal(e) => (exit::RUN_INTERNAL, e),
             };
             if cli.json {
@@ -586,10 +610,19 @@ pub fn main_with(args: Vec<std::ffi::OsString>, out: &mut dyn Write, err: &mut d
         label,
         new_session,
         env_allow,
+        no_log_args,
         args,
     } = &cli.command
     {
-        return cmd_run(&cli, &mut io, label.clone(), *new_session, env_allow, args);
+        return cmd_run(
+            &cli,
+            &mut io,
+            label.clone(),
+            *new_session,
+            env_allow,
+            *no_log_args,
+            args,
+        );
     }
     match execute(&cli, &mut io) {
         Ok(code) => code,
