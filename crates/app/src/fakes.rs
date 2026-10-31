@@ -738,19 +738,27 @@ impl MemTree {
         }
     }
 
-    fn parents_are_safe(&self, path: &RelPath) -> std::result::Result<(), String> {
+    /// `Err((true, why))`: a symlink is in the way (unsafe); `Err((false, why))`: a
+    /// non-directory is in the way (obstruction).
+    fn parents_are_safe(&self, path: &RelPath) -> std::result::Result<(), (bool, String)> {
         let mut cur = path.parent();
         while let Some(p) = cur {
             match self.nodes.borrow().get(&p).map(|s| &s.node) {
                 Some(Node::Symlink { .. }) => {
-                    return Err(format!(
-                        "refusing to traverse a symlink in parent directory of {}",
-                        path.display()
+                    return Err((
+                        true,
+                        format!(
+                            "refusing to traverse a symlink in parent directory of {}",
+                            path.display()
+                        ),
                     ));
                 }
                 Some(Node::Dir { .. }) | None => {}
                 Some(_) => {
-                    return Err(format!("a parent of {} is not a directory", path.display()));
+                    return Err((
+                        false,
+                        format!("a parent of {} is not a directory", path.display()),
+                    ));
                 }
             }
             cur = p.parent();
@@ -830,8 +838,10 @@ impl WorkingTree for Rc<MemTree> {
         if let Some(hook) = self.observe_hook.borrow().as_ref() {
             hook(self, n);
         }
-        if let Err(why) = self.parents_are_safe(path) {
-            return Ok(Observation::Unsafe(why));
+        match self.parents_are_safe(path) {
+            Err((true, why)) => return Ok(Observation::Unsafe(why)),
+            Err((false, why)) => return Ok(Observation::Obstructed(why)),
+            Ok(()) => {}
         }
         let nodes = self.nodes.borrow();
         let Some(s) = nodes.get(path) else {
@@ -844,7 +854,7 @@ impl WorkingTree for Rc<MemTree> {
     }
 
     fn apply(&self, item: &PlanItem, dir_modes: &mut Vec<(RelPath, u32)>) -> Result<Outcome> {
-        if let Err(why) = self.parents_are_safe(&item.path) {
+        if let Err((_, why)) = self.parents_are_safe(&item.path) {
             return Err(Error::Unsafe(why));
         }
         let path = &item.path;

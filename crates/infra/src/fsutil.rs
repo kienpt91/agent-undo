@@ -158,11 +158,19 @@ pub fn check_root(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Walks every ancestor directory of `rel` below `root` with `lstat` and fails
-/// if any is a symlink or not a directory. Missing ancestors are fine (the walk
-/// stops there); callers that create directories re-check each component as
-/// they create it.
-pub fn check_parents(root: &Path, rel: &RelPath) -> Result<()> {
+/// Why a parent chain cannot be used.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentProblem {
+    /// An ancestor is a symlink: never traversed.
+    Symlink(String),
+    /// An ancestor exists but is not a directory.
+    NotDirectory(String),
+}
+
+/// Walks every ancestor directory of `rel` below `root` with `lstat`. Missing
+/// ancestors are fine (the walk stops there); callers that create directories
+/// re-check each component as they create it.
+pub fn parent_problem(root: &Path, rel: &RelPath) -> Result<Option<ParentProblem>> {
     check_root(root)?;
     let mut cur = root.to_path_buf();
     let mut comps = rel.components().peekable();
@@ -174,23 +182,31 @@ pub fn check_parents(root: &Path, rel: &RelPath) -> Result<()> {
         match fs::symlink_metadata(&cur) {
             Ok(m) => {
                 if m.file_type().is_symlink() {
-                    return Err(Error::Unsafe(format!(
+                    return Ok(Some(ParentProblem::Symlink(format!(
                         "refusing to traverse a symlink in parent directory of {:?}",
                         rel.display()
-                    )));
+                    ))));
                 }
                 if !m.is_dir() {
-                    return Err(Error::Unsafe(format!(
+                    return Ok(Some(ParentProblem::NotDirectory(format!(
                         "a parent of {:?} is not a directory",
                         rel.display()
-                    )));
+                    ))));
                 }
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(Error::io(format!("stat parent of {}", rel.display()), e)),
         }
     }
-    Ok(())
+    Ok(None)
+}
+
+/// Fails with `Error::Unsafe` if any ancestor of `rel` is a symlink or not a directory.
+pub fn check_parents(root: &Path, rel: &RelPath) -> Result<()> {
+    match parent_problem(root, rel)? {
+        None => Ok(()),
+        Some(ParentProblem::Symlink(m) | ParentProblem::NotDirectory(m)) => Err(Error::Unsafe(m)),
+    }
 }
 
 /// Opens a regular file for reading without following a final symlink and
@@ -349,6 +365,22 @@ mod tests {
         fs::create_dir_all(root.join("a")).unwrap();
         symlink(&outside, root.join("a/b")).unwrap();
         assert!(check_parents(&root, &rp("a/b/c/file")).is_err());
+    }
+
+    #[test]
+    fn parent_problem_distinguishes_symlinks_from_files() {
+        let root = tmp("problem");
+        fs::write(root.join("f"), b"x").unwrap();
+        symlink("/etc", root.join("l")).unwrap();
+        assert!(matches!(
+            parent_problem(&root, &rp("f/c")).unwrap(),
+            Some(ParentProblem::NotDirectory(_))
+        ));
+        assert!(matches!(
+            parent_problem(&root, &rp("l/c")).unwrap(),
+            Some(ParentProblem::Symlink(_))
+        ));
+        assert_eq!(parent_problem(&root, &rp("ok/c")).unwrap(), None);
     }
 
     #[test]

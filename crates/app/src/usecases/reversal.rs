@@ -14,8 +14,8 @@ use agent_undo_domain::journal::{
 };
 use agent_undo_domain::path::RelPath;
 use agent_undo_domain::plan::{
-    Observation, Outcome, Plan, PlanItem, build_item, execution_order, restore_inputs, same_state,
-    sort_dir_modes, undo_inputs,
+    Observation, Outcome, Plan, PlanItem, build_item, execution_order, resolve_obstructions,
+    restore_inputs, same_state, sort_dir_modes, undo_inputs,
 };
 
 /// Upper bound on the number of paths one plan may hold in memory.
@@ -31,6 +31,7 @@ fn items_from(ports: &Ports<'_>, inputs: Inputs) -> Result<Vec<PlanItem>> {
         let observed = ports.tree.observe(&path)?;
         items.push(build_item(path, target, expected, observed));
     }
+    resolve_obstructions(&mut items);
     Ok(items)
 }
 
@@ -254,7 +255,7 @@ fn execute_item(
                 item.path.display()
             )));
         }
-        Observation::Unsafe(why) => return Err(Error::Unsafe(why)),
+        Observation::Unsafe(why) | Observation::Obstructed(why) => return Err(Error::Unsafe(why)),
     }
     ports.tree.apply(item, dir_modes)
 }

@@ -85,6 +85,10 @@ pub enum Observation {
     State(Option<Entry>),
     /// The path could not be inspected safely (for example a symlinked parent).
     Unsafe(String),
+    /// An ancestor exists but is not a directory (so the path cannot exist now).
+    /// The plan may still be executable if another item replaces that ancestor
+    /// with a directory first.
+    Obstructed(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +102,9 @@ pub struct PlanItem {
     /// The current object is of a different class (dir vs non-dir) and must be removed first.
     pub replace: bool,
     pub status: Status,
+    /// Set while an ancestor of this path is a non-directory; resolved by
+    /// [`resolve_obstructions`].
+    pub obstruction: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -262,6 +269,7 @@ pub fn build_item(
             op: Op::None,
             replace: false,
             status: Status::Blocked(why),
+            obstruction: None,
         },
         Observation::State(current) => {
             let (op, replace, status) = decide(&target, expected.as_ref(), &current);
@@ -273,7 +281,51 @@ pub fn build_item(
                 op,
                 replace,
                 status,
+                obstruction: None,
             }
+        }
+        Observation::Obstructed(why) => {
+            let (op, replace, status) = decide(&target, expected.as_ref(), &None);
+            PlanItem {
+                path,
+                target,
+                expected,
+                current: None,
+                op,
+                replace,
+                status,
+                obstruction: Some(why),
+            }
+        }
+    }
+}
+
+/// Clears obstructions that another item resolves (an ancestor that is a file
+/// now but is restored as a directory, replacing the file first) and blocks the
+/// rest. Call once after all items are built.
+pub fn resolve_obstructions(items: &mut [PlanItem]) {
+    let replaced: std::collections::HashSet<RelPath> = items
+        .iter()
+        .filter(|i| i.op == Op::Mkdir && i.replace && i.status.runnable(true))
+        .map(|i| i.path.clone())
+        .collect();
+    for item in items.iter_mut() {
+        let Some(why) = item.obstruction.take() else {
+            continue;
+        };
+        let mut anc = item.path.parent();
+        let mut fixed = false;
+        while let Some(a) = anc {
+            if replaced.contains(&a) {
+                fixed = true;
+                break;
+            }
+            anc = a.parent();
+        }
+        if !fixed {
+            item.op = Op::None;
+            item.replace = false;
+            item.status = Status::Blocked(why);
         }
     }
 }
@@ -670,7 +722,82 @@ mod tests {
             op,
             replace: false,
             status: Status::Ready,
+            obstruction: None,
         }
+    }
+
+    #[test]
+    fn obstructed_item_is_planned_as_if_absent_until_resolved() {
+        let it = build_item(
+            p("d/x"),
+            file(b"x", 0o644),
+            None,
+            Observation::Obstructed("a parent is a file".into()),
+        );
+        assert_eq!(it.op, Op::Write);
+        assert_eq!(it.current, None);
+        assert_eq!(it.obstruction.as_deref(), Some("a parent is a file"));
+    }
+
+    #[test]
+    fn obstruction_is_cleared_when_an_ancestor_directory_replaces_the_file() {
+        let mut items = vec![
+            build_item(
+                p("d"),
+                dir(0o755),
+                None,
+                Observation::State(file(b"in the way", 0o644)),
+            ),
+            build_item(
+                p("d/x"),
+                file(b"x", 0o644),
+                None,
+                Observation::Obstructed("parent is a file".into()),
+            ),
+            build_item(
+                p("d/sub/y"),
+                file(b"y", 0o644),
+                None,
+                Observation::Obstructed("parent is a file".into()),
+            ),
+        ];
+        assert!(items[0].replace && items[0].op == Op::Mkdir);
+        resolve_obstructions(&mut items);
+        assert!(items.iter().all(|i| i.obstruction.is_none()));
+        assert_eq!(items[1].status, Status::Ready);
+        assert_eq!(
+            items[2].status,
+            Status::Ready,
+            "deeper descendants are covered too"
+        );
+    }
+
+    #[test]
+    fn unresolved_obstruction_blocks_the_item() {
+        let mut items = vec![build_item(
+            p("f/x"),
+            file(b"x", 0o644),
+            None,
+            Observation::Obstructed("parent is a file".into()),
+        )];
+        resolve_obstructions(&mut items);
+        assert!(matches!(&items[0].status, Status::Blocked(r) if r.contains("parent is a file")));
+        assert_eq!(items[0].op, Op::None);
+    }
+
+    #[test]
+    fn a_non_replacing_ancestor_does_not_resolve_the_obstruction() {
+        let mut items = vec![
+            build_item(p("d"), dir(0o755), None, Observation::State(None)),
+            build_item(
+                p("d/x"),
+                file(b"x", 0o644),
+                None,
+                Observation::Obstructed("why".into()),
+            ),
+        ];
+        resolve_obstructions(&mut items);
+        assert!(matches!(items[1].status, Status::Blocked(_)));
     }
 
     #[test]

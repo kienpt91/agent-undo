@@ -11,7 +11,10 @@
 //! restores go through a temp file and `rename`, after re-validating every parent
 //! directory with `lstat` immediately before the rename.
 
-use crate::fsutil::{check_parents, create_new_private, join, open_regular, sibling_tmp};
+use crate::fsutil::{
+    ParentProblem, check_parents, create_new_private, join, open_regular, parent_problem,
+    sibling_tmp,
+};
 use crate::layout::read_file_capped;
 use agent_undo_app::error::{Ctx, Error, Result};
 use agent_undo_app::ports::{
@@ -565,8 +568,10 @@ impl WorkingTree for FsTree {
     }
 
     fn observe(&self, path: &RelPath) -> Result<Observation> {
-        if let Err(Error::Unsafe(why)) = check_parents(&self.root, path) {
-            return Ok(Observation::Unsafe(why));
+        match parent_problem(&self.root, path)? {
+            Some(ParentProblem::Symlink(why)) => return Ok(Observation::Unsafe(why)),
+            Some(ParentProblem::NotDirectory(why)) => return Ok(Observation::Obstructed(why)),
+            None => {}
         }
         let abs = join(&self.root, path);
         let md = match fs::symlink_metadata(&abs) {
