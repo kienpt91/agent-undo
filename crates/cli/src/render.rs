@@ -15,7 +15,7 @@ use agent_undo_app::usecases::verify::VerifyReport;
 use agent_undo_domain::change::{Change, ChangeKind, Counts};
 use agent_undo_domain::diff::DiffOutcome;
 use agent_undo_domain::entry::{Entry, Kind};
-use agent_undo_domain::esc::{display, display_keep_tab};
+use agent_undo_domain::esc::display;
 use agent_undo_domain::hash::to_hex;
 use agent_undo_domain::journal::{CheckpointRecord, ExitInfo, Journal};
 use agent_undo_domain::path::RelPath;
@@ -306,7 +306,7 @@ pub fn diff_text(r: &DiffReport) -> String {
                 };
                 out.push_str(&format!("--- {a}\n+++ {b}\n"));
                 for l in t.lines() {
-                    out.push_str(&display_keep_tab(l.as_bytes()));
+                    out.push_str(l); // already escaped by the domain diff
                     out.push('\n');
                 }
             }
