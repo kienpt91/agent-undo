@@ -20,6 +20,7 @@ pub mod hash;
 pub mod ignore;
 pub mod secrets;
 
+pub mod change;
 pub mod entry;
 pub mod error;
 pub mod path;
