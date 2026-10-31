@@ -168,11 +168,17 @@ impl Locker for MemLocker {
 pub struct MemJournal {
     records: RefCell<Vec<CheckpointRecord>>,
     pruned: RefCell<BTreeSet<u64>>,
+    fail_appends: Cell<bool>,
 }
 
 impl MemJournal {
     pub fn new() -> MemJournal {
         MemJournal::default()
+    }
+
+    /// Test hook: make every following `append` fail (a full disk, a read-only store).
+    pub fn set_fail_appends(&self, fail: bool) {
+        self.fail_appends.set(fail);
     }
 
     /// Test hook: mutate a stored record in place (simulates on-disk tampering).
@@ -190,6 +196,9 @@ impl JournalRepository for MemJournal {
     }
 
     fn append(&self, record: &CheckpointRecord) -> Result<()> {
+        if self.fail_appends.get() {
+            return Err(Error::Other("injected journal failure".into()));
+        }
         self.records.borrow_mut().push(record.clone());
         Ok(())
     }
