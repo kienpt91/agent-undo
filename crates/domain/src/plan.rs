@@ -147,7 +147,8 @@ impl Plan {
     }
 }
 
-fn same(a: &Option<Entry>, b: &Option<Entry>) -> bool {
+/// Whether two observed states are semantically equal (both absent counts as equal).
+pub fn same_state(a: &Option<Entry>, b: &Option<Entry>) -> bool {
     match (a, b) {
         (None, None) => true,
         (Some(x), Some(y)) => x.semantic_eq(y),
@@ -199,12 +200,12 @@ pub fn decide(
             )),
         );
     }
-    if same(target, current) {
+    if same_state(target, current) {
         return (Op::None, false, Status::AlreadyDone);
     }
     let mut reasons: Vec<String> = Vec::new();
     if let Some(exp) = expected
-        && !same(exp, current)
+        && !same_state(exp, current)
     {
         reasons.push(format!(
             "modified since the checkpoint (expected {}, found {})",
