@@ -12,6 +12,7 @@
 )]
 
 pub mod codec;
+pub mod fs_blobs;
 pub mod fsutil;
 pub mod layout;
 pub mod lock;
