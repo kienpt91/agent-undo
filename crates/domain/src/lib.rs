@@ -25,4 +25,5 @@ pub mod entry;
 pub mod error;
 pub mod journal;
 pub mod path;
+pub mod plan;
 pub mod units;
