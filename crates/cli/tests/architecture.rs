@@ -22,10 +22,12 @@ fn dependencies(manifest: &Path) -> Vec<String> {
             in_deps = t == "[dependencies]";
             continue;
         }
-        if in_deps && !t.is_empty() && !t.starts_with('#') {
-            if let Some((name, _)) = t.split_once('=') {
-                deps.push(name.trim().to_string());
-            }
+        if in_deps
+            && !t.is_empty()
+            && !t.starts_with('#')
+            && let Some((name, _)) = t.split_once('=')
+        {
+            deps.push(name.trim().to_string());
         }
     }
     deps.sort();
@@ -116,7 +118,11 @@ fn offenders(layer: &str) -> Vec<String> {
             // std::io is allowed in the application layer only as a type used to
             // wrap adapter errors, never for operations.
             if code.contains("std::io") && layer == "domain" {
-                found.push(format!("{}:{}: std::io in the domain", file.display(), n + 1));
+                found.push(format!(
+                    "{}:{}: std::io in the domain",
+                    file.display(),
+                    n + 1
+                ));
             }
             if code.contains("std::io::") && layer == "app" {
                 let ok = ["std::io::Error", "std::io::Result", "std::io::ErrorKind"]
