@@ -13,6 +13,8 @@
 
 pub mod codec;
 pub mod fs_blobs;
+pub mod fs_journal;
+pub mod fs_snapshots;
 pub mod fsutil;
 pub mod layout;
 pub mod lock;
