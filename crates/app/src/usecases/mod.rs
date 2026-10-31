@@ -2,6 +2,7 @@
 //! journal aggregate, orchestrates ports and publishes events.
 
 pub mod checkpoint;
+pub mod history;
 pub mod init;
 pub mod record;
 pub mod reversal;
