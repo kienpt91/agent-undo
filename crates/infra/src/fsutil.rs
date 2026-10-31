@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -228,6 +228,30 @@ pub fn check_parents(root: &Path, rel: &RelPath) -> Result<()> {
         None => Ok(()),
         Some(ParentProblem::Symlink(m) | ParentProblem::NotDirectory(m)) => Err(Error::Unsafe(m)),
     }
+}
+
+/// Changes the permission bits (`mode & 0o777`) of a regular file without
+/// following a final symlink: the file is opened with `O_NOFOLLOW`, checked with
+/// `fstat`, and changed through the descriptor (`fchmod`). A file that cannot be
+/// opened for reading fails with `PermissionDenied`.
+pub fn chmod_file_nofollow(path: &Path, mode: u32) -> io::Result<()> {
+    let (file, _) = open_regular(path, None)?;
+    file.set_permissions(fs::Permissions::from_mode(mode & 0o777))
+}
+
+/// Like [`chmod_file_nofollow`] for a directory (`O_DIRECTORY | O_NOFOLLOW`).
+pub fn chmod_dir_nofollow(path: &Path, mode: u32) -> io::Result<()> {
+    let dir = OpenOptions::new()
+        .read(true)
+        .custom_flags(OPEN_DIR_FLAGS)
+        .open(path)?;
+    if !dir.metadata()?.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a directory",
+        ));
+    }
+    dir.set_permissions(fs::Permissions::from_mode(mode & 0o777))
 }
 
 /// Opens a regular file for reading without following a final symlink and

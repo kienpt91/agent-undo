@@ -299,6 +299,13 @@ impl<S: EntrySource> Merger<S> {
         Ok(if under { self.head.take() } else { None })
     }
 
+    /// Takes the next remaining previous entry, wherever it is (used when the whole
+    /// tree could not be listed and every old entry is carried forward).
+    pub fn next_remaining(&mut self) -> Result<Option<(RelPath, Entry)>, S::Error> {
+        self.fill()?;
+        Ok(self.head.take())
+    }
+
     /// Emits `Deleted` for every remaining previous entry.
     pub fn finish(&mut self, on_change: OnChange<'_, S::Error>) -> Result<(), S::Error> {
         loop {

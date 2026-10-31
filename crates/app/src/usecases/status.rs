@@ -46,10 +46,17 @@ impl ScanVisitor for PendingVisitor {
         merger.push(path, entry, &mut |c| PendingVisitor::note(pending, c))
     }
 
-    fn carry_forward(&mut self, dir: &RelPath) -> Result<()> {
+    fn carry_forward(&mut self, dir: Option<&RelPath>) -> Result<()> {
         // The previous entries stay as they were: nothing to report for them.
-        while self.merger.next_under(dir)?.is_some() {}
-        Ok(())
+        loop {
+            let next = match dir {
+                Some(d) => self.merger.next_under(d)?,
+                None => self.merger.next_remaining()?,
+            };
+            if next.is_none() {
+                return Ok(());
+            }
+        }
     }
 }
 

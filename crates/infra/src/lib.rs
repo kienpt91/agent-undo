@@ -14,6 +14,7 @@
 pub mod codec;
 pub mod fs_blobs;
 pub mod fs_journal;
+pub mod fs_sensitive;
 pub mod fs_snapshots;
 pub mod fs_tree;
 pub mod fsutil;

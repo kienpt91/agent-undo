@@ -345,3 +345,19 @@ fn renames_ignore_empty_files_and_non_regular_entries() {
     ];
     assert!(detect_renames(&changes).is_empty());
 }
+
+#[test]
+fn next_remaining_drains_everything_in_order() {
+    let mut m = Merger::new(Some(VecSource::new(vec![
+        (p("b"), f(b"b", 0o644)),
+        (p("a"), f(b"a", 0o644)),
+    ])));
+    let mut got = Vec::new();
+    while let Some((path, _)) = m.next_remaining().unwrap() {
+        got.push(path.display());
+    }
+    assert_eq!(got, vec!["a", "b"]);
+    assert!(m.next_remaining().unwrap().is_none());
+    let mut none: Merger<VecSource> = Merger::new(None);
+    assert!(none.next_remaining().unwrap().is_none());
+}

@@ -12,7 +12,7 @@ contract_suite!(
     tree_scan_never_follows_symlinks,
     tree_scan_applies_default_ignores,
     tree_scan_applies_user_ignore_with_negation,
-    tree_oversized_ignore_pattern_is_an_error,
+    tree_oversized_ignore_pattern_degrades_to_defaults_with_a_warning,
     tree_sensitive_files_are_recorded_but_never_stored,
     tree_sensitive_beats_size_cap,
     tree_too_large_file_has_no_blob,

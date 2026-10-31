@@ -169,8 +169,9 @@ pub trait ScanVisitor {
     /// Previous entry for `path`, if any.
     fn prev(&mut self, path: &RelPath) -> Result<Option<Entry>>;
     fn visit(&mut self, path: &RelPath, entry: &Entry) -> Result<()>;
-    /// A directory could not be listed: keep the previous entries below it.
-    fn carry_forward(&mut self, dir: &RelPath) -> Result<()>;
+    /// A directory (`None`: the whole tree) could not be recorded: keep the previous
+    /// entries below it unchanged and report no changes for them.
+    fn carry_forward(&mut self, dir: Option<&RelPath>) -> Result<()>;
 }
 
 /// The project directory as seen and modified by agent-undo.

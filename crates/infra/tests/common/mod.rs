@@ -18,8 +18,8 @@ use agent_undo_domain::entry::{Entry, Kind};
 use agent_undo_domain::hash::{Digest, sha256};
 use agent_undo_domain::journal::CkptKind;
 use agent_undo_domain::journal::{
-    ArgPolicy, CheckpointId, CheckpointRecord, CommandLine, ExitInfo, Journal, Label, MAX_LABEL_BYTES,
-    NewCheckpoint,
+    ArgPolicy, CheckpointId, CheckpointRecord, CommandLine, ExitInfo, Journal, Label,
+    MAX_LABEL_BYTES, NewCheckpoint,
 };
 use agent_undo_domain::path::RelPath;
 use agent_undo_domain::plan::{Observation, Op, Outcome, PlanItem, Status, build_item};
@@ -985,7 +985,10 @@ fn chain() -> Vec<CheckpointRecord> {
     );
     run.new_session = true;
     run.label = Some(Label::new(b"nightly run".to_vec()).unwrap());
-    run.command = Some(CommandLine::recorded(&[b"echo".to_vec(), b"a b".to_vec()], ArgPolicy::Redact));
+    run.command = Some(CommandLine::recorded(
+        &[b"echo".to_vec(), b"a b".to_vec()],
+        ArgPolicy::Redact,
+    ));
     run.exit = Some(ExitInfo::Code(3));
     out.push(seal(&mut j, run));
 
@@ -999,7 +1002,10 @@ fn chain() -> Vec<CheckpointRecord> {
 
     let mut killed = cp(CkptKind::Run, 5, Counts::default(), 6);
     killed.exit = Some(ExitInfo::Signal(9));
-    killed.command = Some(CommandLine::recorded(&[b"sleep".to_vec(), b"100".to_vec()], ArgPolicy::Redact));
+    killed.command = Some(CommandLine::recorded(
+        &[b"sleep".to_vec(), b"100".to_vec()],
+        ArgPolicy::Redact,
+    ));
     out.push(seal(&mut j, killed));
     out
 }
@@ -1151,7 +1157,10 @@ pub fn journal_hostile_text_roundtrips<J: JournalFixture>(make: impl Fn() -> J) 
     for (i, label) in labels.iter().enumerate() {
         let mut n = cp(CkptKind::Manual, i as i64 + 2, Counts::default(), 1);
         n.label = Some(Label::new(label.clone()).unwrap());
-        n.command = Some(CommandLine::recorded(&commands[i % commands.len()], ArgPolicy::Redact));
+        n.command = Some(CommandLine::recorded(
+            &commands[i % commands.len()],
+            ArgPolicy::Redact,
+        ));
         let r = seal(&mut j, n);
         repo.append(&r).unwrap();
         expected.push(r);
@@ -1566,6 +1575,8 @@ pub struct Collect {
     pub prev: BTreeMap<RelPath, Entry>,
     pub seen: Vec<(RelPath, Entry)>,
     pub carried: Vec<RelPath>,
+    /// Set when the whole tree was carried forward.
+    pub carried_all: bool,
 }
 
 impl ScanVisitor for Collect {
@@ -1576,8 +1587,11 @@ impl ScanVisitor for Collect {
         self.seen.push((path.clone(), entry.clone()));
         Ok(())
     }
-    fn carry_forward(&mut self, dir: &RelPath) -> Result<()> {
-        self.carried.push(dir.clone());
+    fn carry_forward(&mut self, dir: Option<&RelPath>) -> Result<()> {
+        match dir {
+            Some(d) => self.carried.push(d.clone()),
+            None => self.carried_all = true,
+        }
         Ok(())
     }
 }
@@ -1586,6 +1600,7 @@ pub struct ScanResult {
     pub entries: Manifest,
     pub stats: ScanStats,
     pub carried: Vec<RelPath>,
+    pub carried_all: bool,
 }
 
 impl ScanResult {
@@ -1637,6 +1652,7 @@ pub fn scan_with(
         entries: v.seen,
         stats,
         carried: v.carried,
+        carried_all: v.carried_all,
     }
 }
 
@@ -1882,26 +1898,32 @@ pub fn tree_scan_applies_user_ignore_with_negation<F: TreeFixture>(make: impl Fn
     assert_eq!(got, want);
 }
 
-pub fn tree_oversized_ignore_pattern_is_an_error<F: TreeFixture>(make: impl Fn(u64) -> F) {
+/// A bad `.agent-undoignore` must not be able to stop recording: the default
+/// ignore rules apply and the scan reports a warning instead of failing.
+pub fn tree_oversized_ignore_pattern_degrades_to_defaults_with_a_warning<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
     let fx = make(BIG_CAP);
     let mut text = vec![b'x'; 5000];
     text.push(b'\n');
     fx.write(".agent-undoignore", &text);
     fx.write("a.txt", b"a");
-    struct Null;
-    impl ScanVisitor for Null {
-        fn prev(&mut self, _: &RelPath) -> Result<Option<Entry>> {
-            Ok(None)
-        }
-        fn visit(&mut self, _: &RelPath, _: &Entry) -> Result<()> {
-            Ok(())
-        }
-        fn carry_forward(&mut self, _: &RelPath) -> Result<()> {
-            Ok(())
-        }
-    }
-    let e = err_of(fx.tree().scan(&ScanOptions::capturing(None), &mut Null));
-    assert!(matches!(e, Error::Format(_)), "{e}");
+    fx.write("node_modules/dep/x.js", b"ignored by default");
+    let r = scan_capture(&fx);
+    let names: Vec<String> = r.entries.iter().map(|(p, _)| p.display()).collect();
+    assert!(names.contains(&"a.txt".to_string()), "{names:?}");
+    assert!(
+        !names.iter().any(|n| n.starts_with("node_modules")),
+        "default ignore rules still apply: {names:?}"
+    );
+    assert!(
+        r.stats
+            .warnings
+            .iter()
+            .any(|w| w.contains(".agent-undoignore")),
+        "{:?}",
+        r.stats.warnings
+    );
 }
 
 pub fn tree_sensitive_files_are_recorded_but_never_stored<F: TreeFixture>(make: impl Fn(u64) -> F) {

@@ -91,12 +91,16 @@ impl ScanVisitor for Recorder {
         })
     }
 
-    fn carry_forward(&mut self, dir: &RelPath) -> Result<()> {
+    fn carry_forward(&mut self, dir: Option<&RelPath>) -> Result<()> {
         // The previous entries stay as they were: record them unchanged, report no change.
-        while let Some((p, e)) = self.merger.next_under(dir)? {
+        loop {
+            let next = match dir {
+                Some(d) => self.merger.next_under(d)?,
+                None => self.merger.next_remaining()?,
+            };
+            let Some((p, e)) = next else { return Ok(()) };
             self.writer.write_entry(&p, &e)?;
         }
-        Ok(())
     }
 }
 

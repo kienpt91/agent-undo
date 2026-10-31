@@ -11,9 +11,10 @@
 //! restores go through a temp file and `rename`, after re-validating every parent
 //! directory with `lstat` immediately before the rename.
 
+use crate::fs_sensitive::FsSensitiveIds;
 use crate::fsutil::{
-    ParentProblem, check_parents, create_new_private, join, open_regular, parent_problem,
-    sibling_tmp,
+    ParentProblem, check_parents, chmod_dir_nofollow, chmod_file_nofollow, create_new_private,
+    join, open_regular, parent_problem, sibling_tmp,
 };
 use crate::layout::read_file_capped;
 use agent_undo_app::error::{Ctx, Error, Result};
@@ -21,13 +22,13 @@ use agent_undo_app::ports::{
     BlobStore, BlobWriter, ScanOptions, ScanStats, ScanVisitor, WorkingTree,
 };
 use agent_undo_domain::entry::{Entry, Kind};
-use agent_undo_domain::esc::display;
 use agent_undo_domain::hash::{Digest, Sha256, to_hex};
 use agent_undo_domain::ignore::{IgnoreSet, MAX_IGNORE_FILE_BYTES};
 use agent_undo_domain::path::RelPath;
 use agent_undo_domain::plan::{Observation, Op, Outcome, PlanItem};
-use agent_undo_domain::policy::{FileClass, cache_usable, classify_file, sensitive_id};
+use agent_undo_domain::policy::{FileClass, Insert, cache_usable, classify_file, sensitive_id};
 use agent_undo_domain::secrets::{Scanner, sensitive_name};
+use std::cell::RefCell;
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -43,12 +44,27 @@ const BUF_SIZE: usize = 64 * 1024;
 const MAX_WARNINGS: usize = 20;
 const MAX_ATTEMPTS: u32 = 3;
 
+/// Where in a scan a test hook is called (see [`FsTree::set_scan_hook`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanStage {
+    /// A directory was listed; the hook receives its path.
+    DirListed,
+    /// A file is about to be opened for reading; the hook receives its path.
+    BeforeFileRead,
+}
+
+type ScanHook = dyn Fn(ScanStage, &Path);
+
 pub struct FsTree {
     root: PathBuf,
     store_dir: PathBuf,
     max_file_size: u64,
     key: [u8; 32],
     blobs: crate::fs_blobs::FsBlobs,
+    sensitive: FsSensitiveIds,
+    max_dir_entries: usize,
+    max_depth: usize,
+    hook: RefCell<Option<Box<ScanHook>>>,
 }
 
 impl FsTree {
@@ -61,10 +77,35 @@ impl FsTree {
     ) -> FsTree {
         FsTree {
             store_dir: fs::canonicalize(store_dir).unwrap_or_else(|_| store_dir.to_path_buf()),
+            sensitive: FsSensitiveIds::new(store_dir.join("sensitive-ids")),
             root,
             max_file_size,
             key,
             blobs,
+            max_dir_entries: MAX_DIR_ENTRIES,
+            max_depth: MAX_DEPTH,
+            hook: RefCell::new(None),
+        }
+    }
+
+    /// Overrides the per-directory entry cap and the depth cap (tests use small
+    /// values; production uses [`MAX_DIR_ENTRIES`] and [`MAX_DEPTH`]).
+    pub fn with_limits(mut self, max_dir_entries: usize, max_depth: usize) -> FsTree {
+        self.max_dir_entries = max_dir_entries;
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Fault-injection seam for tests: `f` runs at the given [`ScanStage`]s, where a
+    /// concurrent process could modify the tree (for example swap a directory for a
+    /// symlink). Not used by the binary.
+    pub fn set_scan_hook(&self, f: impl Fn(ScanStage, &Path) + 'static) {
+        *self.hook.borrow_mut() = Some(Box::new(f));
+    }
+
+    fn call_hook(&self, stage: ScanStage, path: &Path) {
+        if let Some(h) = self.hook.borrow().as_ref() {
+            h(stage, path);
         }
     }
 
@@ -72,12 +113,53 @@ impl FsTree {
         &self.root
     }
 
-    fn load_ignore(&self) -> Result<IgnoreSet> {
-        match read_file_capped(&self.root.join(IGNORE_FILE), MAX_IGNORE_FILE_BYTES)? {
-            Some(t) => IgnoreSet::with_user_patterns(&t)
-                .map_err(|e| Error::Format(format!("{IGNORE_FILE}: {e}"))),
-            None => Ok(IgnoreSet::defaults()),
+    /// The ignore rules in force. A bad `.agent-undoignore` must not disable the
+    /// recorder (a hostile tree could otherwise make every checkpoint fail), so the
+    /// defaults apply and the problem comes back as a warning.
+    fn load_ignore(&self) -> (IgnoreSet, Option<String>) {
+        let loaded = read_file_capped(&self.root.join(IGNORE_FILE), MAX_IGNORE_FILE_BYTES)
+            .map_err(|e| e.to_string())
+            .and_then(|t| match t {
+                Some(t) => IgnoreSet::with_user_patterns(&t),
+                None => Ok(IgnoreSet::defaults()),
+            });
+        match loaded {
+            Ok(set) => (set, None),
+            Err(e) => (
+                IgnoreSet::defaults(),
+                Some(format!(
+                    "{IGNORE_FILE} is invalid ({e}); using the default ignore rules"
+                )),
+            ),
         }
+    }
+
+    fn sid(&self, digest: &Digest) -> Digest {
+        sensitive_id(&self.key, digest)
+    }
+}
+
+/// Identity of a directory as it was when it was listed.
+#[derive(Clone, Copy)]
+struct DirId {
+    dev: u64,
+    ino: u64,
+}
+
+impl DirId {
+    fn of(md: &fs::Metadata) -> DirId {
+        DirId {
+            dev: md.dev(),
+            ino: md.ino(),
+        }
+    }
+
+    /// Whether `path` still names the same real directory (not a symlink, not
+    /// replaced). Narrows, but cannot close, the window against a concurrent
+    /// process: std has no `openat`.
+    fn still_at(&self, path: &Path) -> bool {
+        fs::symlink_metadata(path)
+            .is_ok_and(|m| m.is_dir() && m.dev() == self.dev && m.ino() == self.ino)
     }
 }
 
@@ -97,6 +179,8 @@ enum CopyResult {
     Stored,
     Sensitive,
     Changed,
+    /// The file could not be rewound or read again.
+    Unreadable,
 }
 
 /// Classifies single paths: reads files, scans content, optionally stores blobs.
@@ -132,6 +216,7 @@ impl<'a> Classifier<'a> {
         rel: &RelPath,
         md: &fs::Metadata,
         cached: Option<&Entry>,
+        parent: Option<(&Path, DirId)>,
     ) -> Result<Option<Entry>> {
         let ft = md.file_type();
         let mtime_ns = ts(md.mtime(), md.mtime_nsec());
@@ -169,13 +254,35 @@ impl<'a> Classifier<'a> {
             && (c.kind() != Kind::File
                 || !self.capture
                 || c.digest().is_some_and(|d| self.tree.blobs.contains(&d)))
+            && !self.became_sensitive(c)?
         {
             self.stats.files_cached += 1;
             return Ok(Some(c.with_mode(mode)));
         }
-        self.hash_file(abs, rel, md, mode, mtime_ns, ctime_ns)
+        self.hash_file(abs, rel, md, mode, mtime_ns, ctime_ns, parent)
     }
 
+    /// A cached regular-file entry whose content has since been recognised as
+    /// sensitive (for example because a copy of it was found under a secret name)
+    /// must be classified again.
+    fn became_sensitive(&self, cached: &Entry) -> Result<bool> {
+        match (cached.kind(), cached.digest()) {
+            (Kind::File, Some(d)) => self.tree.sensitive.contains(&self.tree.sid(&d)),
+            _ => Ok(false),
+        }
+    }
+
+    fn remember(&mut self, sid: Digest) -> Result<()> {
+        if self.tree.sensitive.remember(sid, self.capture)? == Insert::Full {
+            self.warn(
+                "the sensitive-content registry is full; copies of newly found secrets may be stored"
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn hash_file(
         &mut self,
         abs: &Path,
@@ -184,10 +291,23 @@ impl<'a> Classifier<'a> {
         mode: u32,
         mtime_ns: i64,
         ctime_ns: i64,
+        parent: Option<(&Path, DirId)>,
     ) -> Result<Option<Entry>> {
         let name_sensitive = sensitive_name(rel.as_bytes()).is_some();
         let unreadable = |md: &fs::Metadata| Entry::unreadable(mode, md.len(), mtime_ns, ctime_ns);
+        let parent_ok = |p: &Option<(&Path, DirId)>| p.is_none_or(|(dir, id)| id.still_at(dir));
+        let swapped = |s: &mut Self| {
+            s.warn(format!(
+                "the directory of {:?} changed while it was being read; the file was not recorded",
+                rel.display()
+            ));
+        };
         for _attempt in 0..MAX_ATTEMPTS {
+            if !parent_ok(&parent) {
+                swapped(self);
+                return Ok(Some(unreadable(md)));
+            }
+            self.tree.call_hook(ScanStage::BeforeFileRead, abs);
             let (mut file, _) = match open_regular(abs, Some(md)) {
                 Ok(x) => x,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -221,24 +341,26 @@ impl<'a> Classifier<'a> {
             }
             self.stats.files_hashed += 1;
             self.stats.bytes_hashed = self.stats.bytes_hashed.saturating_add(total);
+            if !parent_ok(&parent) {
+                swapped(self);
+                return Ok(Some(unreadable(md)));
+            }
             let digest = hasher.finalize();
-            let sens = |d: &Digest| {
-                Entry::hashed(
-                    Kind::Sensitive,
-                    &sensitive_id(&self.tree.key, d),
-                    mode,
-                    total,
-                    mtime_ns,
-                    ctime_ns,
-                )
-            };
+            let sid = self.tree.sid(&digest);
+            let known = self.tree.sensitive.contains(&sid)?;
+            let sens =
+                |d: &Digest| Entry::hashed(Kind::Sensitive, d, mode, total, mtime_ns, ctime_ns);
             match classify_file(
                 name_sensitive,
                 scanner.result().is_some(),
+                known,
                 total,
                 self.tree.max_file_size,
             ) {
-                FileClass::Sensitive => return Ok(Some(sens(&digest)?)),
+                FileClass::Sensitive => {
+                    self.remember(sid)?;
+                    return Ok(Some(sens(&sid)?));
+                }
                 FileClass::TooLarge => {
                     return Ok(Some(Entry::hashed(
                         Kind::TooLarge,
@@ -257,12 +379,22 @@ impl<'a> Classifier<'a> {
             }
             match self.copy_blob(&mut file, &digest, total, rel)? {
                 CopyResult::Stored => {
+                    if !parent_ok(&parent) {
+                        // The blob was new in this call, so removing it loses nothing.
+                        let _ = self.tree.blobs.remove(&digest);
+                        swapped(self);
+                        return Ok(Some(unreadable(md)));
+                    }
                     self.stats.blobs_written += 1;
                     self.stats.bytes_stored = self.stats.bytes_stored.saturating_add(total);
                     return Ok(Some(file_entry));
                 }
-                CopyResult::Sensitive => return Ok(Some(sens(&digest)?)),
+                CopyResult::Sensitive => {
+                    self.remember(sid)?;
+                    return Ok(Some(sens(&sid)?));
+                }
                 CopyResult::Changed => continue,
+                CopyResult::Unreadable => return Ok(Some(unreadable(md))),
             }
         }
         self.warn(format!(
@@ -281,8 +413,10 @@ impl<'a> Classifier<'a> {
         expect_len: u64,
         rel: &RelPath,
     ) -> Result<CopyResult> {
-        file.seek(SeekFrom::Start(0))
-            .ctx(|| format!("rewinding {}", rel.display()))?;
+        if let Err(e) = file.seek(SeekFrom::Start(0)) {
+            self.warn(format!("cannot rewind {:?}: {e}", rel.display()));
+            return Ok(CopyResult::Unreadable);
+        }
         let mut writer: Box<dyn BlobWriter> = self.tree.blobs.writer()?;
         let mut scanner = Scanner::new();
         let mut total = 0u64;
@@ -324,18 +458,94 @@ struct Walker<'a> {
 }
 
 impl Walker<'_> {
-    fn walk_dir(
+    /// Relative path of a directory entry, or `None` (with a warning) if its name
+    /// cannot be represented.
+    fn child_rel(
+        &mut self,
+        dir_rel: Option<&RelPath>,
+        name: &OsStr,
+        shown: &str,
+    ) -> Option<RelPath> {
+        let rel = match dir_rel {
+            Some(d) => d.join(name.as_bytes()),
+            None => RelPath::from_name(name.as_bytes()),
+        };
+        if rel.is_err() {
+            self.c
+                .warn(format!("skipping unsupported path below {shown:?}"));
+        }
+        rel.ok()
+    }
+
+    /// Records the keyed id of every secret-by-name file before the real walk, so a
+    /// copy of such a file that sorts earlier than the original is still recognised
+    /// by content. Reads only files with secret names; everything else is metadata.
+    fn remember_named_secrets(
         &mut self,
         dir_abs: &Path,
         dir_rel: Option<&RelPath>,
         depth: usize,
+    ) -> Result<()> {
+        if depth > self.c.tree.max_depth {
+            return Ok(());
+        }
+        let Ok(rd) = fs::read_dir(dir_abs) else {
+            return Ok(());
+        };
+        let shown = dir_rel.map_or_else(String::new, RelPath::display);
+        for (seen, ent) in rd.enumerate() {
+            let Ok(ent) = ent else { continue };
+            if seen >= self.c.tree.max_dir_entries {
+                break;
+            }
+            let Some(rel) = self.child_rel(dir_rel, &ent.file_name(), &shown) else {
+                continue;
+            };
+            let abs = dir_abs.join(ent.file_name());
+            if abs == self.c.tree.store_dir {
+                continue;
+            }
+            let Ok(ft) = ent.file_type() else { continue };
+            if self.ignore.is_ignored(rel.as_bytes(), ft.is_dir()) {
+                continue;
+            }
+            if ft.is_dir() {
+                self.remember_named_secrets(&abs, Some(&rel), depth + 1)?;
+            } else if ft.is_file() && sensitive_name(rel.as_bytes()).is_some() {
+                let Ok((mut file, _)) = open_regular(&abs, None) else {
+                    continue;
+                };
+                let mut hasher = Sha256::new();
+                loop {
+                    match file.read(&mut self.c.buf) {
+                        Ok(0) => break,
+                        Ok(n) => hasher.update(self.c.buf.get(..n).unwrap_or(&[])),
+                        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+                let sid = self.c.tree.sid(&hasher.finalize());
+                self.c.remember(sid)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn walk_dir(
+        &mut self,
+        dir_abs: &Path,
+        dir_rel: Option<&RelPath>,
+        dir_id: DirId,
+        depth: usize,
         visitor: &mut dyn ScanVisitor,
     ) -> Result<()> {
         let shown = dir_rel.map_or_else(String::new, RelPath::display);
-        if depth > MAX_DEPTH {
-            return Err(Error::Limit(format!(
-                "directory nesting deeper than {MAX_DEPTH} levels below {shown:?}"
-            )));
+        let (max_entries, max_depth) = (self.c.tree.max_dir_entries, self.c.tree.max_depth);
+        if depth > max_depth {
+            self.c.warn(format!(
+                "directory nesting deeper than {max_depth} levels at {shown:?}; its contents are not recorded"
+            ));
+            return visitor.carry_forward(dir_rel);
         }
         let rd = match fs::read_dir(dir_abs) {
             Ok(rd) => rd,
@@ -344,13 +554,12 @@ impl Walker<'_> {
                 self.c.warn(format!(
                     "cannot list directory {shown:?}: {e}; keeping its previous entries"
                 ));
-                return match dir_rel {
-                    Some(d) => visitor.carry_forward(d),
-                    None => Ok(()),
-                };
+                return visitor.carry_forward(dir_rel);
             }
         };
-        let mut names: Vec<OsString> = Vec::new();
+        // Ignored names are dropped while listing, so a huge directory of ignored
+        // files (build output, caches) neither counts against the cap nor uses memory.
+        let mut names: Vec<(OsString, RelPath)> = Vec::new();
         for ent in rd {
             let ent = match ent {
                 Ok(e) => e,
@@ -359,24 +568,31 @@ impl Walker<'_> {
                     continue;
                 }
             };
-            if names.len() >= MAX_DIR_ENTRIES {
-                return Err(Error::Limit(format!(
-                    "directory {shown:?} has more than {MAX_DIR_ENTRIES} entries; add it to {IGNORE_FILE}"
-                )));
-            }
-            names.push(ent.file_name());
-        }
-        names.sort_by(|a, b| a.as_bytes().cmp(b.as_bytes()));
-        for name in names {
-            let rel = match dir_rel {
-                Some(d) => d.join(name.as_bytes()),
-                None => RelPath::from_name(name.as_bytes()),
-            };
-            let Ok(rel) = rel else {
-                self.c
-                    .warn(format!("skipping unsupported path below {shown:?}"));
+            let name = ent.file_name();
+            let Some(rel) = self.child_rel(dir_rel, &name, &shown) else {
                 continue;
             };
+            let is_dir = ent.file_type().is_ok_and(|t| t.is_dir());
+            if self.ignore.is_ignored(rel.as_bytes(), is_dir) {
+                continue;
+            }
+            if names.len() >= max_entries {
+                self.c.warn(format!(
+                    "directory {shown:?} has more than {max_entries} entries; its contents are not recorded (add it to {IGNORE_FILE})"
+                ));
+                return visitor.carry_forward(dir_rel);
+            }
+            names.push((name, rel));
+        }
+        self.c.tree.call_hook(ScanStage::DirListed, dir_abs);
+        if !dir_id.still_at(dir_abs) {
+            self.c.warn(format!(
+                "directory {shown:?} changed while it was being listed; its contents are not recorded"
+            ));
+            return visitor.carry_forward(dir_rel);
+        }
+        names.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+        for (name, rel) in names {
             let abs = dir_abs.join(&name);
             if abs == self.c.tree.store_dir {
                 continue;
@@ -401,13 +617,16 @@ impl Walker<'_> {
             } else {
                 None
             };
-            let Some(entry) = self.c.entry_for(&abs, &rel, &md, cached.as_ref())? else {
+            let Some(entry) =
+                self.c
+                    .entry_for(&abs, &rel, &md, cached.as_ref(), Some((dir_abs, dir_id)))?
+            else {
                 continue;
             };
             self.c.stats.entries += 1;
             visitor.visit(&rel, &entry)?;
             if is_dir {
-                self.walk_dir(&abs, Some(&rel), depth + 1, visitor)?;
+                self.walk_dir(&abs, Some(&rel), DirId::of(&md), depth + 1, visitor)?;
             }
         }
         Ok(())
@@ -546,24 +765,24 @@ impl FsTree {
     }
 }
 
-fn set_mode(path: &Path, rel: &RelPath, mode: u32) -> Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o777))
-        .map_err(|e| io_err("setting mode of", rel, e))
-}
-
 impl WorkingTree for FsTree {
     fn scan(&self, opts: &ScanOptions, visitor: &mut dyn ScanVisitor) -> Result<ScanStats> {
         let md = fs::symlink_metadata(&self.root).ctx(|| "stat project root".into())?;
         let cutoff = opts
             .cache_time_ns
             .map(|t| t.saturating_sub(opts.cache_margin_ns));
+        let (ignore, ignore_warning) = self.load_ignore();
         let mut w = Walker {
             c: Classifier::new(self, opts.capture, cutoff),
-            ignore: self.load_ignore()?,
+            ignore,
             root_dev: md.dev(),
             use_cache: cutoff.is_some() && !opts.no_cache,
         };
-        w.walk_dir(&self.root, None, 0, visitor)?;
+        if let Some(why) = ignore_warning {
+            w.c.warn(why);
+        }
+        w.remember_named_secrets(&self.root, None, 0)?;
+        w.walk_dir(&self.root, None, DirId::of(&md), 0, visitor)?;
         Ok(w.c.stats)
     }
 
@@ -582,7 +801,9 @@ impl WorkingTree for FsTree {
             Err(e) => return Err(io_err("stat", path, e)),
         };
         let mut c = Classifier::new(self, false, None);
-        Ok(Observation::State(c.entry_for(&abs, path, &md, None)?))
+        Ok(Observation::State(
+            c.entry_for(&abs, path, &md, None, None)?,
+        ))
     }
 
     fn apply(&self, item: &PlanItem, dir_modes: &mut Vec<(RelPath, u32)>) -> Result<Outcome> {
@@ -652,7 +873,20 @@ impl WorkingTree for FsTree {
                 if item.target.as_ref().is_some_and(|t| t.kind() == Kind::Dir) {
                     dir_modes.push((rel.clone(), mode));
                 } else {
-                    set_mode(&abs, rel, mode)?;
+                    match chmod_file_nofollow(&abs, mode) {
+                        Ok(()) => {}
+                        // A file we may not open (mode 000): its content is unchanged and
+                        // stored, so restore it through the temp-file-and-rename path.
+                        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                            let t = item.target.as_ref();
+                            let blob = t.and_then(Entry::blob);
+                            let (Some(t), Some(blob)) = (t, blob) else {
+                                return Err(io_err("changing the mode of", rel, e));
+                            };
+                            self.restore_file(rel, &blob, t)?;
+                        }
+                        Err(e) => return Err(io_err("changing the mode of", rel, e)),
+                    }
                 }
                 Ok(Outcome::Applied)
             }
@@ -662,13 +896,14 @@ impl WorkingTree for FsTree {
     fn set_dir_mode(&self, path: &RelPath, mode: u32) -> Result<()> {
         check_parents(&self.root, path)?;
         let abs = join(&self.root, path);
-        let md = fs::symlink_metadata(&abs).map_err(|e| io_err("stat", path, e))?;
-        if !md.is_dir() {
-            return Err(Error::Unsafe(format!(
-                "{} is no longer a directory",
-                display(path.as_bytes())
-            )));
-        }
-        set_mode(&abs, path, mode)
+        chmod_dir_nofollow(&abs, mode).map_err(|e| match e.kind() {
+            std::io::ErrorKind::PermissionDenied => Error::Other(format!(
+                "cannot change the mode of {} safely (the directory is not readable)",
+                path.display()
+            )),
+            std::io::ErrorKind::NotFound => io_err("changing the mode of", path, e),
+            // A symlink, a file or anything else that is not a plain directory.
+            _ => Error::Unsafe(format!("{} is not a plain directory", path.display())),
+        })
     }
 }

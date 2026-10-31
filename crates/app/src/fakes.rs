@@ -15,7 +15,9 @@ use agent_undo_domain::ignore::IgnoreSet;
 use agent_undo_domain::journal::{CheckpointId, CheckpointRecord, Journal};
 use agent_undo_domain::path::RelPath;
 use agent_undo_domain::plan::{Observation, Op, Outcome, PlanItem};
-use agent_undo_domain::policy::{FileClass, cache_usable, classify_file, sensitive_id};
+use agent_undo_domain::policy::{
+    FileClass, SensitiveIds, cache_usable, classify_file, sensitive_id,
+};
 use agent_undo_domain::secrets::{scan_bytes, sensitive_name};
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -503,7 +505,16 @@ pub struct MemTree {
     unlistable: RefCell<BTreeSet<RelPath>>,
     observe_calls: Cell<usize>,
     observe_hook: RefCell<Option<Box<ObserveHook>>>,
+    /// Keyed ids of every content classified as sensitive so far (see `FsTree`).
+    known: RefCell<SensitiveIds>,
+    /// `(max entries per directory, max depth)`, like `FsTree`.
+    limits: Cell<(usize, usize)>,
 }
+
+/// Same default caps as the filesystem adapter.
+pub const DEFAULT_MAX_DIR_ENTRIES: usize = 200_000;
+pub const DEFAULT_MAX_DEPTH: usize = 256;
+pub const MAX_SENSITIVE_IDS: usize = 200_000;
 
 /// Called before every `observe` with the tree and the 1-based call number.
 pub type ObserveHook = dyn Fn(&MemTree, usize);
@@ -519,7 +530,19 @@ impl MemTree {
             unlistable: RefCell::new(BTreeSet::new()),
             observe_calls: Cell::new(0),
             observe_hook: RefCell::new(None),
+            known: RefCell::new(SensitiveIds::new(MAX_SENSITIVE_IDS)),
+            limits: Cell::new((DEFAULT_MAX_DIR_ENTRIES, DEFAULT_MAX_DEPTH)),
         }
+    }
+
+    /// Overrides the per-directory entry cap and the depth cap.
+    pub fn set_limits(&self, max_dir_entries: usize, max_depth: usize) {
+        self.limits.set((max_dir_entries, max_depth));
+    }
+
+    /// Number of distinct sensitive contents remembered.
+    pub fn known_sensitive_count(&self) -> usize {
+        self.known.borrow().len()
     }
 
     /// Test hook: run `f` before each `observe` call (to swap files between
@@ -693,6 +716,10 @@ impl MemTree {
                     && (ce.kind() != Kind::File
                         || !capture
                         || ce.digest().is_some_and(|d| self.blobs.contains(&d)))
+                    && !(ce.kind() == Kind::File
+                        && ce.digest().is_some_and(|d| {
+                            self.known.borrow().contains(&sensitive_id(&self.key, &d))
+                        }))
                 {
                     stats.files_cached += 1;
                     return Ok(ce.with_mode(*mode));
@@ -702,16 +729,14 @@ impl MemTree {
                 let digest = sha256(content);
                 let name_sensitive = sensitive_name(path.as_bytes()).is_some();
                 let flagged = !name_sensitive && scan_bytes(content).is_some();
+                let sid = sensitive_id(&self.key, &digest);
+                let known = self.known.borrow().contains(&sid);
                 Ok(
-                    match classify_file(name_sensitive, flagged, size, self.max_file_size) {
-                        FileClass::Sensitive => Entry::hashed(
-                            Kind::Sensitive,
-                            &sensitive_id(&self.key, &digest),
-                            *mode,
-                            size,
-                            m,
-                            c,
-                        )?,
+                    match classify_file(name_sensitive, flagged, known, size, self.max_file_size) {
+                        FileClass::Sensitive => {
+                            self.known.borrow_mut().insert(sid);
+                            Entry::hashed(Kind::Sensitive, &sid, *mode, size, m, c)?
+                        }
                         FileClass::TooLarge => {
                             Entry::hashed(Kind::TooLarge, &digest, *mode, size, m, c)?
                         }
@@ -729,11 +754,21 @@ impl MemTree {
         }
     }
 
-    fn ignore_set(&self) -> Result<IgnoreSet> {
+    /// The ignore rules in force. A bad `.agent-undoignore` must not stop recording
+    /// (a hostile tree could otherwise disable the recorder), so the defaults apply
+    /// and the problem is returned as a warning.
+    fn ignore_set(&self) -> (IgnoreSet, Option<String>) {
         match self.read(".agent-undoignore") {
-            Some(text) => IgnoreSet::with_user_patterns(&text)
-                .map_err(|e| Error::Format(format!(".agent-undoignore: {e}"))),
-            None => Ok(IgnoreSet::defaults()),
+            Some(text) => match IgnoreSet::with_user_patterns(&text) {
+                Ok(set) => (set, None),
+                Err(e) => (
+                    IgnoreSet::defaults(),
+                    Some(format!(
+                        ".agent-undoignore is invalid ({e}); using the default ignore rules"
+                    )),
+                ),
+            },
+            None => (IgnoreSet::defaults(), None),
         }
     }
 
@@ -768,7 +803,8 @@ impl MemTree {
 
 impl WorkingTree for Rc<MemTree> {
     fn scan(&self, opts: &ScanOptions, visitor: &mut dyn ScanVisitor) -> Result<ScanStats> {
-        let ignore = self.ignore_set()?;
+        let (ignore, ignore_warning) = self.ignore_set();
+        let (max_entries, max_depth) = self.limits.get();
         let snapshot: Vec<(RelPath, Stamped)> = self
             .nodes
             .borrow()
@@ -782,20 +818,19 @@ impl WorkingTree for Rc<MemTree> {
                 .map(|t| t.saturating_sub(opts.cache_margin_ns))
         };
         let mut stats = ScanStats::default();
+        if let Some(w) = ignore_warning {
+            stats.warnings_total += 1;
+            stats.warnings.push(w);
+        }
+        // Paths that are not ignored (directly or through an ignored directory).
+        let mut live: Vec<(RelPath, Stamped)> = Vec::new();
         let mut skip_prefix: Option<RelPath> = None;
-        let mut carried: Option<RelPath> = None;
         for (path, stamped) in snapshot {
             if let Some(sp) = &skip_prefix {
                 if path.is_below(sp) {
                     continue;
                 }
                 skip_prefix = None;
-            }
-            if let Some(cp) = &carried {
-                if path.is_below(cp) {
-                    continue;
-                }
-                carried = None;
             }
             let is_dir = matches!(stamped.node, Node::Dir { .. });
             if ignore.is_ignored(path.as_bytes(), is_dir) {
@@ -804,6 +839,44 @@ impl WorkingTree for Rc<MemTree> {
                 }
                 continue;
             }
+            live.push((path, stamped));
+        }
+        // Remember secrets by name first, so a copy that sorts earlier is still caught.
+        for (path, stamped) in &live {
+            if let Node::File { content, .. } = &stamped.node
+                && sensitive_name(path.as_bytes()).is_some()
+            {
+                let sid = sensitive_id(&self.key, &sha256(content));
+                self.known.borrow_mut().insert(sid);
+            }
+        }
+        let mut children: BTreeMap<Option<RelPath>, usize> = BTreeMap::new();
+        for (path, _) in &live {
+            *children.entry(path.parent()).or_insert(0) += 1;
+        }
+        let degrade = |stats: &mut ScanStats, what: String| {
+            stats.warnings_total += 1;
+            stats.warnings.push(what);
+        };
+        if children.get(&None).copied().unwrap_or(0) > max_entries {
+            degrade(
+                &mut stats,
+                format!(
+                    "the project root has more than {max_entries} entries; its contents are not recorded (add them to .agent-undoignore)"
+                ),
+            );
+            visitor.carry_forward(None)?;
+            return Ok(stats);
+        }
+        let mut carried: Option<RelPath> = None;
+        for (path, stamped) in live {
+            if let Some(cp) = &carried {
+                if path.is_below(cp) {
+                    continue;
+                }
+                carried = None;
+            }
+            let is_dir = matches!(stamped.node, Node::Dir { .. });
             let cached = if cutoff.is_some() {
                 visitor.prev(&path)?
             } else {
@@ -819,12 +892,27 @@ impl WorkingTree for Rc<MemTree> {
             )?;
             stats.entries += 1;
             visitor.visit(&path, &entry)?;
-            if is_dir && self.unlistable.borrow().contains(&path) {
-                stats.warnings_total += 1;
-                stats
-                    .warnings
-                    .push(format!("cannot list directory {}", path.display()));
-                visitor.carry_forward(&path)?;
+            if !is_dir {
+                continue;
+            }
+            let reason = if self.unlistable.borrow().contains(&path) {
+                Some(format!("cannot list directory {}", path.display()))
+            } else if path.depth() > max_depth {
+                Some(format!(
+                    "directory nesting deeper than {max_depth} levels at {}; its contents are not recorded",
+                    path.display()
+                ))
+            } else if children.get(&Some(path.clone())).copied().unwrap_or(0) > max_entries {
+                Some(format!(
+                    "directory {} has more than {max_entries} entries; its contents are not recorded (add it to .agent-undoignore)",
+                    path.display()
+                ))
+            } else {
+                None
+            };
+            if let Some(why) = reason {
+                degrade(&mut stats, why);
+                visitor.carry_forward(Some(&path))?;
                 carried = Some(path);
             }
         }
