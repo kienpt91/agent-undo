@@ -180,3 +180,69 @@ fn join_and_path_from_bytes() {
     assert_eq!(join(Path::new("/r"), &rp("a/b")), PathBuf::from("/r/a/b"));
     assert_eq!(path_from_bytes(b"x/y".to_vec()), PathBuf::from("x/y"));
 }
+
+#[test]
+fn open_flag_constants_match_the_values_read_from_each_target() {
+    // Read with Python's `os.O_*` on each platform (see the table in fsutil.rs).
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    let want = (0x20000, 0x800, 0x10000);
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    let want = (0x8000, 0x800, 0x4000);
+    #[cfg(target_os = "macos")]
+    let want = (0x100, 0x4, 0x100000);
+    assert_eq!(O_NOFOLLOW, want.0);
+    assert_eq!(OPEN_FLAGS, want.0 | want.1);
+    assert_eq!(OPEN_DIR_FLAGS, want.0 | want.2);
+}
+
+#[test]
+fn opening_a_symlink_with_the_flags_fails_with_eloop_not_by_chance() {
+    let root = tmp("eloop");
+    fs::write(root.join("real"), b"x").unwrap();
+    symlink(root.join("real"), root.join("link")).unwrap();
+    let err = open_regular(&root.join("link"), None).unwrap_err();
+    // ELOOP is 40 on Linux and 62 on macOS; a missing flag would have opened the file.
+    assert!(matches!(err.raw_os_error(), Some(40 | 62)), "{err:?}");
+}
+
+#[test]
+fn opening_a_directory_symlink_with_the_directory_flags_fails() {
+    let root = tmp("dirloop");
+    fs::create_dir(root.join("d")).unwrap();
+    symlink(root.join("d"), root.join("dl")).unwrap();
+    let open = |p: &Path| {
+        OpenOptions::new()
+            .read(true)
+            .custom_flags(OPEN_DIR_FLAGS)
+            .open(p)
+    };
+    assert!(open(&root.join("d")).is_ok());
+    assert!(open(&root.join("dl")).is_err());
+    assert!(open(&root.join("nope")).is_err());
+    fs::write(root.join("f"), b"x").unwrap();
+    assert!(
+        open(&root.join("f")).is_err(),
+        "O_DIRECTORY refuses regular files"
+    );
+}
+
+#[test]
+fn a_fifo_does_not_hang_open_regular() {
+    let root = tmp("fifo");
+    let fifo = root.join("pipe");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+    if !made.is_ok_and(|s| s.success()) {
+        return; // mkfifo unavailable
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    let p = fifo.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(open_regular(&p, None).is_err());
+    });
+    let got = rx.recv_timeout(std::time::Duration::from_secs(10));
+    assert_eq!(
+        got,
+        Ok(true),
+        "open_regular on a FIFO must fail fast, not block"
+    );
+}

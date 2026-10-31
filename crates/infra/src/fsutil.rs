@@ -18,34 +18,55 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// `O_NOFOLLOW | O_NONBLOCK` for the supported targets. `O_NOFOLLOW` makes
-/// `open` fail with `ELOOP` if the final component is a symlink and
-/// `O_NONBLOCK` keeps `open` from hanging if a FIFO is swapped in. On other
-/// targets the flags are 0 and the post-open `fstat` identity check is the only
-/// defence.
-#[cfg(all(
-    target_os = "linux",
-    any(target_arch = "x86_64", target_arch = "x86", target_arch = "riscv64")
-))]
-const OPEN_FLAGS: i32 = 0x20000 | 0x800;
-#[cfg(all(target_os = "linux", any(target_arch = "aarch64", target_arch = "arm")))]
-const OPEN_FLAGS: i32 = 0x8000 | 0x800;
+/// Raw `open(2)` flag values. std exposes `custom_flags` but no named constants,
+/// so the values are fixed per supported target. They were read from the C library
+/// of each target (Python's `os.O_*`, which wraps the platform header) and are
+/// asserted again in the tests. Any other target does not compile: guessing here
+/// would silently drop the protection against following symlinks and blocking on
+/// FIFOs.
+///
+/// | target | `O_NOFOLLOW` | `O_NONBLOCK` | `O_DIRECTORY` |
+/// |---|---|---|---|
+/// | Linux x86_64 | `0x20000` | `0x800` | `0x10000` |
+/// | Linux aarch64 | `0x8000` | `0x800` | `0x4000` |
+/// | macOS (x86_64, aarch64) | `0x100` | `0x4` | `0x100000` |
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod sysflags {
+    pub const O_NOFOLLOW: i32 = 0x20000;
+    pub const O_NONBLOCK: i32 = 0x800;
+    pub const O_DIRECTORY: i32 = 0x10000;
+}
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+mod sysflags {
+    pub const O_NOFOLLOW: i32 = 0x8000;
+    pub const O_NONBLOCK: i32 = 0x800;
+    pub const O_DIRECTORY: i32 = 0x4000;
+}
 #[cfg(target_os = "macos")]
-const OPEN_FLAGS: i32 = 0x100 | 0x4;
+mod sysflags {
+    pub const O_NOFOLLOW: i32 = 0x100;
+    pub const O_NONBLOCK: i32 = 0x4;
+    pub const O_DIRECTORY: i32 = 0x100000;
+}
 #[cfg(not(any(
     all(
         target_os = "linux",
-        any(
-            target_arch = "x86_64",
-            target_arch = "x86",
-            target_arch = "riscv64",
-            target_arch = "aarch64",
-            target_arch = "arm"
-        )
+        any(target_arch = "x86_64", target_arch = "aarch64")
     ),
     target_os = "macos"
 )))]
-const OPEN_FLAGS: i32 = 0;
+compile_error!(
+    "agent-undo supports Linux (x86_64, aarch64) and macOS only: the open(2) flag values that \
+     keep it from following symlinks are defined per target in crates/infra/src/fsutil.rs and \
+     must be verified for any new target"
+);
+
+/// Flags for reading a regular file: refuse a final symlink, never block on a FIFO.
+pub const OPEN_FLAGS: i32 = sysflags::O_NOFOLLOW | sysflags::O_NONBLOCK;
+/// Flags for opening a directory without following a final symlink.
+pub const OPEN_DIR_FLAGS: i32 = sysflags::O_NOFOLLOW | sysflags::O_DIRECTORY;
+/// Flag that makes `open` refuse a final symlink.
+pub const O_NOFOLLOW: i32 = sysflags::O_NOFOLLOW;
 
 /// Nanoseconds since the Unix epoch (saturating; 0 if the clock is before 1970).
 pub fn now_ns() -> i64 {
