@@ -246,3 +246,16 @@ fn a_fifo_does_not_hang_open_regular() {
         "open_regular on a FIFO must fail fast, not block"
     );
 }
+
+#[test]
+fn effective_uid_is_the_owner_of_files_this_process_creates() {
+    let root = tmp("uid");
+    let f = root.join("f");
+    fs::write(&f, b"x").unwrap();
+    assert_eq!(effective_uid().unwrap(), fs::metadata(&f).unwrap().uid());
+    assert_eq!(
+        effective_uid().unwrap(),
+        effective_uid().unwrap(),
+        "cached and stable"
+    );
+}
