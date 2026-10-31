@@ -78,9 +78,11 @@ pub fn gc(ports: &Ports<'_>, policy: RetentionPolicy, apply: bool) -> Result<GcR
             ports.events.publish(Event::Domain(e));
         }
     }
-    ports.events.publish(Event::GarbageCollected {
-        checkpoints: doomed.len() as u64,
-        blobs: garbage.len() as u64,
-    });
+    if !doomed.is_empty() || !garbage.is_empty() {
+        ports.events.publish(Event::GarbageCollected {
+            checkpoints: doomed.len() as u64,
+            blobs: garbage.len() as u64,
+        });
+    }
     Ok(report)
 }
