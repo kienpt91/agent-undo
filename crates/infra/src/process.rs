@@ -11,19 +11,37 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub struct ProcessRunner {
+    /// Working directory of the wrapped command (the project root).
     cwd: PathBuf,
+    /// Directory `agent-undo` was started in; relative program names and relative
+    /// `PATH` entries mean this directory, as they would for any other command.
+    caller_dir: PathBuf,
 }
 
 impl ProcessRunner {
+    /// Runs commands in `cwd`; relative programs are resolved against the current
+    /// directory of this process.
     pub fn new(cwd: PathBuf) -> ProcessRunner {
-        ProcessRunner { cwd }
+        let caller_dir = std::env::current_dir().unwrap_or_else(|_| cwd.clone());
+        ProcessRunner { cwd, caller_dir }
+    }
+
+    pub fn with_caller_dir(cwd: PathBuf, caller_dir: PathBuf) -> ProcessRunner {
+        ProcessRunner { cwd, caller_dir }
     }
 }
 
-/// Resolves `program` like a shell would: names with a `/` are used as given,
-/// others are searched in `path_var` (the parent's `PATH`, even when the child
-/// environment does not contain it).
-pub fn resolve_program(program: &[u8], path_var: Option<&OsStr>) -> Option<PathBuf> {
+/// Resolves `program` like a shell would and returns an **absolute** path: names
+/// with a `/` are taken relative to `caller_dir`, others are searched in `path_var`
+/// (the parent's `PATH`, even when the child environment does not contain it),
+/// where relative and empty entries also mean `caller_dir`. The command then runs
+/// in a different directory (the project root), so a relative path must never be
+/// handed to `exec`: it would name another file.
+pub fn resolve_program(
+    program: &[u8],
+    path_var: Option<&OsStr>,
+    caller_dir: &Path,
+) -> Option<PathBuf> {
     if program.is_empty() {
         return None;
     }
@@ -32,13 +50,20 @@ pub fn resolve_program(program: &[u8], path_var: Option<&OsStr>) -> Option<PathB
     };
     if program.contains(&b'/') {
         let p = PathBuf::from(OsString::from_vec(program.to_vec()));
+        let p = if p.is_absolute() {
+            p
+        } else {
+            caller_dir.join(p)
+        };
         return std::fs::metadata(&p).is_ok().then_some(p);
     }
     for dir in std::env::split_paths(path_var?) {
         let dir = if dir.as_os_str().is_empty() {
-            PathBuf::from(".")
-        } else {
+            caller_dir.to_path_buf()
+        } else if dir.is_absolute() {
             dir
+        } else {
+            caller_dir.join(dir)
         };
         let cand = dir.join(OsStr::from_bytes(program));
         if is_exec(&cand) {
@@ -54,7 +79,7 @@ impl CommandRunner for ProcessRunner {
             return Ok(RunOutcome::NotFound);
         };
         let path_var = std::env::var_os("PATH");
-        let Some(resolved) = resolve_program(program, path_var.as_deref()) else {
+        let Some(resolved) = resolve_program(program, path_var.as_deref(), &self.caller_dir) else {
             return Ok(RunOutcome::NotFound);
         };
         let parent: Vec<(Vec<u8>, Vec<u8>)> = std::env::vars_os()
