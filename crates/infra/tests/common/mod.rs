@@ -1309,6 +1309,8 @@ pub trait TreeFixture {
     /// Makes a directory impossible to list; `false` if that cannot be arranged here.
     fn set_unlistable(&self, dir: &str) -> bool;
     fn set_listable(&self, dir: &str);
+    /// Lowers the per-directory entry cap and the depth cap of the scanner.
+    fn set_limits(&self, max_dir_entries: usize, max_depth: usize);
 }
 
 const OUTSIDE_KEEP: &[u8] = b"SENTINEL-OUTSIDE-THE-PROJECT";
@@ -1401,6 +1403,9 @@ impl TreeFixture for FakeTreeEnv {
         true
     }
     fn set_listable(&self, _dir: &str) {}
+    fn set_limits(&self, max_dir_entries: usize, max_depth: usize) {
+        self.tree.set_limits(max_dir_entries, max_depth);
+    }
 }
 
 // ---- real fixture
@@ -1565,6 +1570,9 @@ impl TreeFixture for FsTreeEnv {
     }
     fn set_listable(&self, dir: &str) {
         fs::set_permissions(self.abs(dir), fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    fn set_limits(&self, max_dir_entries: usize, max_depth: usize) {
+        self.tree.set_limits(max_dir_entries, max_depth);
     }
 }
 
@@ -2697,4 +2705,247 @@ pub fn tree_apply_write_with_missing_blob_is_integrity_error<F: TreeFixture>(
     assert!(matches!(e, Error::Integrity(_)), "{e}");
     assert_eq!(fx.read("t.txt").unwrap(), b"old content");
     assert_eq!(fx.paths(), vec!["t.txt".to_string()]);
+}
+
+// ---- SU-001: copies and renames of secret files stay sensitive
+
+/// Content that no detector recognises: only the name `.env` makes it a secret.
+const PLAIN_SECRET: &[u8] = b"hunter2\n";
+
+fn assert_secret_not_in_store(fx: &impl TreeFixture, needle: &[u8]) {
+    assert_no_blob_contains(fx.blobs(), needle);
+    assert!(!fx.blobs().contains(&sha256(needle)));
+}
+
+pub fn tree_copy_of_a_secret_file_stays_sensitive<F: TreeFixture>(make: impl Fn(u64) -> F) {
+    let fx = make(BIG_CAP);
+    fx.write(".env", PLAIN_SECRET);
+    fx.write("settings.txt", PLAIN_SECRET); // `cp .env settings.txt`
+    fx.write("deep/dir/copy.cfg", PLAIN_SECRET);
+    fx.write("notes.txt", b"ordinary text that is not a secret");
+    let r = scan_capture(&fx);
+    for p in [".env", "settings.txt", "deep/dir/copy.cfg"] {
+        assert_eq!(r.get(p).kind(), Kind::Sensitive, "{p}");
+        assert!(r.get(p).blob().is_none(), "{p}");
+    }
+    assert_eq!(r.get("notes.txt").kind(), Kind::File);
+    assert_secret_not_in_store(&fx, PLAIN_SECRET);
+    assert_eq!(
+        all_blob_bytes(fx.blobs()),
+        vec![b"ordinary text that is not a secret".to_vec()]
+    );
+}
+
+pub fn tree_copy_sorted_before_the_secret_is_still_sensitive<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    // `-copy.txt` sorts before `.env`, so the walk meets the copy first.
+    let fx = make(BIG_CAP);
+    fx.write("-copy.txt", PLAIN_SECRET);
+    fx.write(".a-copy", PLAIN_SECRET);
+    fx.write(".env", PLAIN_SECRET);
+    let r = scan_capture(&fx);
+    for p in ["-copy.txt", ".a-copy", ".env"] {
+        assert_eq!(r.get(p).kind(), Kind::Sensitive, "{p}");
+    }
+    assert_secret_not_in_store(&fx, PLAIN_SECRET);
+    assert!(all_blob_bytes(fx.blobs()).is_empty());
+}
+
+pub fn tree_rename_of_a_secret_file_stays_sensitive<F: TreeFixture>(make: impl Fn(u64) -> F) {
+    let fx = make(BIG_CAP);
+    fx.write(".env", PLAIN_SECRET);
+    let first = scan_capture(&fx);
+    assert_eq!(first.get(".env").kind(), Kind::Sensitive);
+    // the agent renames it to an innocent name and the original disappears
+    fx.remove(".env");
+    fx.write("config.sample", PLAIN_SECRET);
+    let opts = ScanOptions {
+        capture: true,
+        cache_time_ns: Some(now_ns() + 10_000_000_000),
+        cache_margin_ns: 0,
+        no_cache: false,
+    };
+    let second = scan_with(&fx, &opts, &first.entries);
+    assert_eq!(second.get("config.sample").kind(), Kind::Sensitive);
+    assert!(!second.has(".env"));
+    assert_secret_not_in_store(&fx, PLAIN_SECRET);
+}
+
+pub fn tree_content_stored_earlier_is_reclassified_once_it_is_known_to_be_secret<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    let fx = make(BIG_CAP);
+    fx.write("settings.txt", PLAIN_SECRET);
+    let first = scan_capture(&fx);
+    assert_eq!(
+        first.get("settings.txt").kind(),
+        Kind::File,
+        "not known yet"
+    );
+    // later the same content shows up under a secret name
+    fx.write(".env", PLAIN_SECRET);
+    let opts = ScanOptions {
+        capture: true,
+        cache_time_ns: Some(now_ns() + 10_000_000_000),
+        cache_margin_ns: 0,
+        no_cache: false,
+    };
+    let second = scan_with(&fx, &opts, &first.entries);
+    assert_eq!(second.get(".env").kind(), Kind::Sensitive);
+    assert_eq!(
+        second.get("settings.txt").kind(),
+        Kind::Sensitive,
+        "the stat cache must not keep an old File entry for content now known to be secret"
+    );
+    assert!(second.get("settings.txt").blob().is_none());
+}
+
+pub fn tree_observe_classifies_by_known_content<F: TreeFixture>(make: impl Fn(u64) -> F) {
+    let fx = make(BIG_CAP);
+    fx.write(".env", PLAIN_SECRET);
+    fx.write("copy.txt", PLAIN_SECRET);
+    fx.write("plain.txt", b"just text");
+    scan_capture(&fx);
+    for (p, kind) in [
+        ("copy.txt", Kind::Sensitive),
+        ("plain.txt", Kind::File),
+        (".env", Kind::Sensitive),
+    ] {
+        match fx.tree().observe(&rp(p)).unwrap() {
+            Observation::State(Some(e)) => assert_eq!(e.kind(), kind, "{p}"),
+            other => panic!("{p}: {other:?}"),
+        }
+    }
+}
+
+pub fn tree_ordinary_duplicate_content_is_unaffected<F: TreeFixture>(make: impl Fn(u64) -> F) {
+    let fx = make(BIG_CAP);
+    fx.write("a.txt", b"same bytes");
+    fx.write("b.txt", b"same bytes");
+    fx.write(".env", PLAIN_SECRET);
+    let r = scan_capture(&fx);
+    assert_eq!(r.get("a.txt").kind(), Kind::File);
+    assert_eq!(r.get("b.txt").kind(), Kind::File);
+    assert_eq!(r.get("a.txt").digest(), r.get("b.txt").digest());
+}
+
+pub fn tree_dotenv_style_content_under_an_innocent_name_is_sensitive<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    let fx = make(BIG_CAP);
+    let secret = b"DB_PASSWORD=hunter2\nPORT=5432\n";
+    fx.write("settings.txt", secret);
+    fx.write("app.cfg", b"PORT=5432\nLOG_LEVEL=debug\n");
+    let r = scan_capture(&fx);
+    assert_eq!(r.get("settings.txt").kind(), Kind::Sensitive);
+    assert_eq!(r.get("app.cfg").kind(), Kind::File);
+    assert_secret_not_in_store(&fx, b"hunter2");
+}
+
+pub fn tree_sensitive_content_is_remembered_by_scans_that_store_nothing<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    // A read-only scan (status) classifies with what is known and does not write blobs.
+    let fx = make(BIG_CAP);
+    fx.write(".env", PLAIN_SECRET);
+    fx.write("copy.txt", PLAIN_SECRET);
+    let r = scan_with(&fx, &ScanOptions::observing(None), &[]);
+    assert_eq!(r.get("copy.txt").kind(), Kind::Sensitive);
+    assert_eq!(r.stats.blobs_written, 0);
+    assert!(all_blob_bytes(fx.blobs()).is_empty());
+}
+
+// ---- SU-002: hostile tree shapes degrade instead of failing the scan
+
+pub fn tree_too_many_entries_in_one_directory_degrade_without_failing<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    let fx = make(BIG_CAP);
+    fx.set_limits(5, 256);
+    for i in 0..6 {
+        fx.write(&format!("big/f{i}.txt"), b"x");
+    }
+    fx.write("ok/a.txt", b"a");
+    fx.write("top.txt", b"t");
+    let r = scan_capture(&fx);
+    assert!(r.has("big"), "the directory itself is still recorded");
+    assert!(
+        !r.paths().iter().any(|p| p.starts_with("big/")),
+        "{:?}",
+        r.paths()
+    );
+    assert!(r.has("ok/a.txt") && r.has("top.txt"), "{:?}", r.paths());
+    assert!(
+        r.carried.iter().any(|p| p.display() == "big"),
+        "old entries are carried forward"
+    );
+    assert!(
+        r.stats
+            .warnings
+            .iter()
+            .any(|w| w.contains("more than 5 entries")),
+        "{:?}",
+        r.stats.warnings
+    );
+}
+
+pub fn tree_ignored_names_do_not_count_against_the_entry_cap<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    let fx = make(BIG_CAP);
+    fx.set_limits(5, 256);
+    fx.write(".agent-undoignore", b"*.tmp\n");
+    for i in 0..40 {
+        fx.write(&format!("d/junk{i}.tmp"), b"x");
+    }
+    for i in 0..3 {
+        fx.write(&format!("d/real{i}.txt"), b"x");
+    }
+    let r = scan_capture(&fx);
+    for i in 0..3 {
+        assert!(r.has(&format!("d/real{i}.txt")), "{:?}", r.paths());
+    }
+    assert!(r.carried.is_empty() && !r.carried_all);
+    assert!(r.stats.warnings.is_empty(), "{:?}", r.stats.warnings);
+}
+
+pub fn tree_nesting_beyond_the_depth_cap_degrades_without_failing<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    let fx = make(BIG_CAP);
+    fx.set_limits(1000, 3);
+    fx.write("a/b/c/d/e/deep.txt", b"deep");
+    fx.write("a/b/c/near.txt", b"near");
+    let r = scan_capture(&fx);
+    assert!(r.has("a/b/c/near.txt"));
+    assert!(r.has("a/b/c/d"), "the directory at the cap is recorded");
+    assert!(!r.has("a/b/c/d/e"), "{:?}", r.paths());
+    assert!(r.carried.iter().any(|p| p.display() == "a/b/c/d"));
+    assert!(
+        r.stats.warnings.iter().any(|w| w.contains("deeper than 3")),
+        "{:?}",
+        r.stats.warnings
+    );
+}
+
+pub fn tree_root_with_too_many_entries_degrades_without_failing<F: TreeFixture>(
+    make: impl Fn(u64) -> F,
+) {
+    let fx = make(BIG_CAP);
+    fx.set_limits(3, 256);
+    for i in 0..5 {
+        fx.write(&format!("f{i}.txt"), b"x");
+    }
+    let r = scan_capture(&fx);
+    assert!(r.entries.is_empty());
+    assert!(
+        r.carried_all,
+        "everything previously recorded is carried forward"
+    );
+    assert!(
+        r.stats.warnings.iter().any(|w| w.contains("project root")),
+        "{:?}",
+        r.stats.warnings
+    );
 }

@@ -28,7 +28,7 @@ use agent_undo_domain::path::RelPath;
 use agent_undo_domain::plan::{Observation, Op, Outcome, PlanItem};
 use agent_undo_domain::policy::{FileClass, Insert, cache_usable, classify_file, sensitive_id};
 use agent_undo_domain::secrets::{Scanner, sensitive_name};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, DirBuilder, File};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -62,8 +62,8 @@ pub struct FsTree {
     key: [u8; 32],
     blobs: crate::fs_blobs::FsBlobs,
     sensitive: FsSensitiveIds,
-    max_dir_entries: usize,
-    max_depth: usize,
+    max_dir_entries: Cell<usize>,
+    max_depth: Cell<usize>,
     hook: RefCell<Option<Box<ScanHook>>>,
 }
 
@@ -82,18 +82,17 @@ impl FsTree {
             max_file_size,
             key,
             blobs,
-            max_dir_entries: MAX_DIR_ENTRIES,
-            max_depth: MAX_DEPTH,
+            max_dir_entries: Cell::new(MAX_DIR_ENTRIES),
+            max_depth: Cell::new(MAX_DEPTH),
             hook: RefCell::new(None),
         }
     }
 
     /// Overrides the per-directory entry cap and the depth cap (tests use small
     /// values; production uses [`MAX_DIR_ENTRIES`] and [`MAX_DEPTH`]).
-    pub fn with_limits(mut self, max_dir_entries: usize, max_depth: usize) -> FsTree {
-        self.max_dir_entries = max_dir_entries;
-        self.max_depth = max_depth;
-        self
+    pub fn set_limits(&self, max_dir_entries: usize, max_depth: usize) {
+        self.max_dir_entries.set(max_dir_entries);
+        self.max_depth.set(max_depth);
     }
 
     /// Fault-injection seam for tests: `f` runs at the given [`ScanStage`]s, where a
@@ -486,7 +485,7 @@ impl Walker<'_> {
         dir_rel: Option<&RelPath>,
         depth: usize,
     ) -> Result<()> {
-        if depth > self.c.tree.max_depth {
+        if depth > self.c.tree.max_depth.get() {
             return Ok(());
         }
         let Ok(rd) = fs::read_dir(dir_abs) else {
@@ -495,7 +494,7 @@ impl Walker<'_> {
         let shown = dir_rel.map_or_else(String::new, RelPath::display);
         for (seen, ent) in rd.enumerate() {
             let Ok(ent) = ent else { continue };
-            if seen >= self.c.tree.max_dir_entries {
+            if seen >= self.c.tree.max_dir_entries.get() {
                 break;
             }
             let Some(rel) = self.child_rel(dir_rel, &ent.file_name(), &shown) else {
@@ -540,10 +539,17 @@ impl Walker<'_> {
         visitor: &mut dyn ScanVisitor,
     ) -> Result<()> {
         let shown = dir_rel.map_or_else(String::new, RelPath::display);
-        let (max_entries, max_depth) = (self.c.tree.max_dir_entries, self.c.tree.max_depth);
+        let what = dir_rel.map_or_else(
+            || "the project root".to_string(),
+            |d| format!("directory {:?}", d.display()),
+        );
+        let (max_entries, max_depth) = (
+            self.c.tree.max_dir_entries.get(),
+            self.c.tree.max_depth.get(),
+        );
         if depth > max_depth {
             self.c.warn(format!(
-                "directory nesting deeper than {max_depth} levels at {shown:?}; its contents are not recorded"
+                "directory nesting deeper than {max_depth} levels at {what}; its contents are not recorded"
             ));
             return visitor.carry_forward(dir_rel);
         }
@@ -552,7 +558,7 @@ impl Walker<'_> {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
                 self.c.warn(format!(
-                    "cannot list directory {shown:?}: {e}; keeping its previous entries"
+                    "cannot list {what}: {e}; keeping its previous entries"
                 ));
                 return visitor.carry_forward(dir_rel);
             }
@@ -578,7 +584,7 @@ impl Walker<'_> {
             }
             if names.len() >= max_entries {
                 self.c.warn(format!(
-                    "directory {shown:?} has more than {max_entries} entries; its contents are not recorded (add it to {IGNORE_FILE})"
+                    "{what} has more than {max_entries} entries; its contents are not recorded (add it to {IGNORE_FILE})"
                 ));
                 return visitor.carry_forward(dir_rel);
             }
@@ -587,7 +593,7 @@ impl Walker<'_> {
         self.c.tree.call_hook(ScanStage::DirListed, dir_abs);
         if !dir_id.still_at(dir_abs) {
             self.c.warn(format!(
-                "directory {shown:?} changed while it was being listed; its contents are not recorded"
+                "{what} changed while it was being listed; its contents are not recorded"
             ));
             return visitor.carry_forward(dir_rel);
         }
