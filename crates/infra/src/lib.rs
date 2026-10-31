@@ -13,3 +13,5 @@
 
 pub mod codec;
 pub mod fsutil;
+pub mod layout;
+pub mod lock;
