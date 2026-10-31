@@ -12,6 +12,7 @@
 )]
 
 pub mod args;
+pub mod commands;
 pub mod doctor;
 pub mod json;
 pub mod render;
