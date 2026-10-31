@@ -24,17 +24,22 @@ agent-undo undo 3 --apply            # roll it back; the undo is itself undoable
 * **Content-addressed snapshots.** SHA-256 blob store, one manifest per checkpoint
   (path -> blob, mode, size, mtime, kind), deduplicated. Files above a configurable cap
   (default 25 MiB) are recorded by hash only (`too-large`) and cannot be restored.
-* **Secrets are never copied.** `.env*`, `*.pem`, `*.key`, `id_rsa*`, `id_ed25519*`,
-  `.npmrc`, `.netrc`, anything under `.aws/`, `.ssh/`, `.gnupg/`, keystores, credentials
-  files, and any file whose *content* matches a secret detector (private key headers,
-  common API key shapes, JWTs, credentials in URLs, high-entropy values assigned to
-  secret-like names) are recorded as `sensitive`: path, size and a keyed hash of the
-  hash only. Their bytes are never written to the store and undo reports them as
-  *not restorable by design*.
+* **Secrets are not copied (best effort).** `.env*`, `*.pem`, `*.key`, `*.p8`, `*.gpg`,
+  `id_rsa*`, `id_ed25519*`, `.npmrc`, `.netrc`, `.vault-token`, shell and database
+  histories, anything under `.aws/`, `.ssh/`, `.gnupg/`, keystores, credentials files,
+  and any file whose *content* matches a secret detector (private key headers, common API
+  key shapes, JWTs, credentials in URLs, `NAME_PASSWORD=value`-style assignments, and
+  high-entropy values assigned to secret-like names) are recorded as `sensitive`: path,
+  size and a keyed hash of the hash only. Their bytes are never written to the store and
+  undo reports them as *not restorable by design*. A **copy or rename** of a secret file
+  stays sensitive: the store remembers the keyed ids of every sensitive content and
+  checks each file it reads against them, whatever the file is called now. The detectors
+  are heuristics (line-oriented, ASCII only); see "Security model" for what they miss.
 * **Safe undo.** Plan first; refuse if something other than the recorded change touched
   a path (conflict) unless `--force`; save the current state as a `pre-undo` checkpoint
-  before changing anything; never leave the project root; never follow symlinks; write
-  files through temp file plus `rename`; re-validate every path right before touching it.
+  before changing anything; never leave the project root; do not follow symlinks (parents are re-checked with
+  `lstat`, modes are changed through a descriptor opened with `O_NOFOLLOW`); write files
+  through temp file plus `rename`; re-validate every path right before touching it.
 * **Tamper-evident history.** The checkpoint log is hash-chained; `verify` re-hashes every
   blob and re-checks the chain.
 * **Single binary, no dependencies.** `cargo build --release` produces one executable;
@@ -50,8 +55,10 @@ target/release/agent-undo --help
 
 The binary links the platform's C library dynamically (the Rust default); a fully static
 build is possible with a musl target if you have it installed, but is not part of the
-checks here. Unix only (Linux and macOS; the open flags are defined for x86_64, x86,
-aarch64, arm, riscv64 Linux and macOS).
+checks here. Supported targets: Linux (x86_64, aarch64) and macOS. The `open(2)` flag
+values that keep the tool from following symlinks are defined per target and were read
+from each platform's C library; any other target fails to compile instead of silently
+losing that protection.
 
 Everything in this repository is developed and tested inside a throwaway container:
 
@@ -209,8 +216,9 @@ GLOBAL OPTIONS:
 EXIT CODES:
   0 ok   1 failure   2 usage   3 undo/restore refused (conflicts)   4 store locked
   5 verify/doctor found problems   6 not initialized
-  run: the command's own exit status (128+N for signal N); 125 agent-undo failed,
-       126 cannot execute, 127 not found
+  run: the command's own exit status (128+N for signal N); 125 agent-undo failed before
+       the command started, 126 cannot execute, 127 not found. If the command ran but its
+       checkpoint could not be recorded, its own status is returned and stderr says so.
 ```
 
 * `undo` and `restore` are previews unless `--apply` is given. `undo` takes exactly one of
@@ -219,11 +227,21 @@ EXIT CODES:
 * `gc` is a preview unless `--apply` is given. It never prunes the newest checkpoint and
   deletes blobs no remaining checkpoint references. Pruned checkpoints stay in the log
   (the chain stays valid) but cannot be undone or diffed.
-* `run` starts the command in the project root with inherited stdio. Environment policy:
-  the parent environment is inherited by default; `--env-allow A,B` (repeatable) passes
-  *only* those variables. In both modes `AGENT_UNDO_ACTIVE=1`, `AGENT_UNDO_SESSION` and
-  `AGENT_UNDO_CHECKPOINT` are added. Program names are looked up in the parent's `PATH`.
-  The report goes to stderr so the command's stdout is untouched.
+* `run` starts the command with the project root as its working directory and inherited
+  stdio. Environment policy: the parent environment is inherited by default;
+  `--env-allow A,B` (repeatable) passes *only* those variables. In both modes
+  `AGENT_UNDO_ACTIVE=1`, `AGENT_UNDO_SESSION` and `AGENT_UNDO_CHECKPOINT` are added.
+  Program names are looked up in the parent's `PATH`; a relative program path (`./tool`)
+  and relative `PATH` entries are resolved against the directory you ran `agent-undo` in
+  (not the project root) and handed to `exec` as an absolute path. Relative *arguments*
+  are interpreted by the command in the project root. The report goes to stderr so the
+  command's stdout is untouched, together with up to five scan warnings.
+  The recorded command line has secrets redacted (`--password VALUE`, `--token=VALUE`,
+  `NAME_SECRET=value` words, `Authorization:` headers, token shapes); `--no-log-args`
+  records only the program name. Labels that look like secrets are redacted too.
+  Killing the wrapper (`SIGKILL`/`SIGTERM`/`SIGHUP`) cannot be handled without `unsafe`:
+  the command may keep running and no checkpoint is recorded for that run, but the next
+  `run`, `checkpoint` or `watch` records its changes as an `external` checkpoint.
 * `watch` polls (no OS watcher): every `--interval` it compares the tree with the last
   checkpoint and records a `watch` checkpoint once the change set has been stable for
   `--quiet`. The quiet-period logic is a pure function of injected time and is tested
@@ -235,7 +253,8 @@ EXIT CODES:
   `__pycache__`, `.venv`, `venv`, `.cache` and similar caches, `.DS_Store`.
   `.agent-undoignore` (gitignore-style subset: `*`, `?`, `[a-z]`, `**`, `!`, anchoring,
   trailing `/`; matched without regular expressions in polynomial time) adds patterns and
-  can re-include defaults with `!dist/`. Git operations are therefore not recorded or
+  can re-include defaults with `!dist/`. The file lives in the project, so an agent can
+  edit it; a malformed or oversized one is replaced by the defaults with a warning. Git operations are therefore not recorded or
   undone.
 
 ### Exit codes
@@ -277,13 +296,26 @@ agent-undo --json log | tail -1          # includes head_hash: anchor it elsewhe
 * Output escaping covers every path, link target, label and command line: control
   characters, ANSI/OSC sequences, line breaks and bidirectional overrides are escaped.
   Diffs never print the content of files recorded as sensitive.
-* Symlinks are recorded as links and never followed. Files are opened with
-  `O_NOFOLLOW` and an `fstat` identity check. Undo re-validates the whole parent chain
-  with `lstat` immediately before each rename. **Rust's standard library has no
-  `openat`, so a concurrent process with write access to the project can still race the
-  gap between that check and the rename.** The window is narrowed, not closed.
+* Symlinks are recorded as links and not followed. Files are opened with `O_NOFOLLOW` and
+  an `fstat` identity check; a scan re-checks each directory's identity after listing it
+  and around each file read; undo re-validates the whole parent chain with `lstat`
+  immediately before each rename and changes modes through a no-follow descriptor.
+  **Rust's standard library has no `openat`, so a concurrent process with write access
+  to the project can still race the gap between a check and the following operation.**
+  The windows are narrowed, not closed (details in `SECURITY.md`).
+* The store is refused unless it is owned by you, has no group/other permission bits and
+  contains no symlinked store files; `init` refuses planted symlinks.
 * The detectors are heuristics written for this project and tested with fixtures built at
-  runtime. They reduce the chance of storing a secret; they do not guarantee it.
+  runtime. They reduce the chance of storing a secret; they do not guarantee it. They are
+  line-oriented and ASCII only (UTF-16, base64 or compressed copies and values split over
+  several lines are not seen), and a secret first seen under an innocent name with
+  undetectable content is stored until the same content shows up under a secret name.
+* A hostile tree cannot stop recording: unreadable files, directories with more than
+  200,000 entries, nesting deeper than 256 levels and a malformed `.agent-undoignore`
+  degrade to warnings (and, for the two caps, to a directory whose contents are not
+  recorded) instead of failing the checkpoint.
+* `--force` is all-or-nothing and can overwrite a `too-large` file whose content is not
+  backed up anywhere; it never applies sensitive, special or blocked items.
 * `SECURITY.md` has the threat model, the reporting address and the dependency policy.
 
 ### What Rust does and does not give you here
@@ -375,8 +407,9 @@ are test support and are reported on their own line, not counted in the layers.
   not recorded; setuid/setgid/sticky bits are not restored.
 * A process that races the tool inside the project can exploit the check/use window
   described above.
-* Blobs are written without `fsync` (manifests, change sets and the log are); a power
-  loss can leave a checkpoint whose blobs are missing, which `verify` reports.
+* Blobs, manifests, change sets and the log are `fsync`ed before they are renamed or
+  appended; directory entries are synced best effort, so a power loss can still leave a
+  checkpoint whose newest blobs are missing, which `verify` reports.
 * `watch` stops on Ctrl-C without cleanup; interrupted writes leave temp files that
   `doctor` reports and `gc --apply` removes.
 * The hash is a small portable implementation checked against the standard vectors, not

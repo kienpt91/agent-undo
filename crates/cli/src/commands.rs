@@ -65,8 +65,9 @@ GLOBAL OPTIONS:
 EXIT CODES:
   0 ok   1 failure   2 usage   3 undo/restore refused (conflicts)   4 store locked
   5 verify/doctor found problems   6 not initialized
-  run: the command's own exit status (128+N for signal N); 125 agent-undo failed,
-       126 cannot execute, 127 not found
+  run: the command's own exit status (128+N for signal N); 125 agent-undo failed before
+       the command started, 126 cannot execute, 127 not found. If the command ran but its
+       checkpoint could not be recorded, its own status is returned and stderr says so.
 ";
 
 pub struct Io<'a> {

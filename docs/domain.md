@@ -35,6 +35,9 @@ the README. If a term here changes, change it everywhere.
 | **Dry run / apply** | Reversals and `gc` only preview by default; `--apply` changes things. | CLI |
 | **Retention policy** | `keep last N` or `older than D`; the newest checkpoint is never pruned. | `domain::journal::RetentionPolicy` |
 | **Pruned** | A checkpoint removed by `gc`: its record stays in the chain, its manifest, change set and unreferenced blobs are gone. | `Journal::prune` |
+| **Known sensitive content** | The set of keyed ids of every content ever classified as sensitive; a file whose content matches is sensitive under any name. | `domain::policy::SensitiveIds`, `infra::fs_sensitive` |
+| **Degraded directory** | A directory (or the project root) whose contents are not recorded because it is too large, too deep or could not be listed; its previous entries are carried forward. | `ScanVisitor::carry_forward` |
+| **Redaction** | Replacing secret-looking parts of recorded command lines and labels with `[redacted]`. | `domain::redact` |
 | **Verify** | Re-check of the chain, every checkpoint file digest and every blob hash. | `usecases::verify` |
 | **Stat cache** | Re-use of a previous entry when size, mtime and ctime match and are older than the previous snapshot minus a margin. | `domain::policy::cache_usable` |
 | **Quiet period** | `watch` records a checkpoint only after the pending change set stopped changing for this long. | `domain::watch::Debouncer` |
